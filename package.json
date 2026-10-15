@@ -15,6 +15,9 @@
   "type": "module",
   "scripts": {
     "host": "node apps/launcher/index.ts",
+    "build:host": "node packaging/build-host.mjs",
+    "build:package": "node packaging/build-package.mjs",
+    "build:dmg": "node packaging/macos/build-dmg.mjs",
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "agent": "node scripts/timeline-command.mjs",
@@ -57,10 +60,12 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@vitejs/plugin-react": "^5.0.4",
+    "esbuild": "0.25.12",
     "eslint": "^10.7.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.3",
     "globals": "^17.7.0",
+    "postject": "1.0.0-alpha.6",
     "prettier": "^3.9.5",
     "typescript": "^7.0.2",
     "vite": "^6.4.2"

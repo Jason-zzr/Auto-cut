@@ -3,12 +3,12 @@ import { machineDirectory, openBrowser } from "./platform.ts";
 import { claimInstance } from "../host/instance.ts";
 import { startHost } from "../host/server.ts";
 
-async function launch() {
+export async function launch(dist: string) {
   const instance = await claimInstance(await machineDirectory());
   if (!instance) return;
   let host: Awaited<ReturnType<typeof startHost>>;
   try {
-    host = await startHost({ ...instance, dist: fileURLToPath(new URL("../../dist/", import.meta.url)), openBrowser });
+    host = await startHost({ ...instance, dist, openBrowser });
   } catch (error) {
     try { await instance.release(); }
     catch (cleanupError) {
@@ -32,7 +32,7 @@ async function launch() {
   }
 }
 
-void launch().catch((error: unknown) => {
+if (import.meta.main) void launch(fileURLToPath(new URL("../../dist/", import.meta.url))).catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : "Auto-cut startup failed.");
   process.exitCode = 1;
 });
