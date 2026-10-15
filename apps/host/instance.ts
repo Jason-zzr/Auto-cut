@@ -53,25 +53,30 @@ export async function claimInstance(directory: string) {
     ownerFile = await open(ownerPath, "wx", 0o600);
     await ownerFile.writeFile(ownerText);
   } catch (error) {
-    const currentLock = await lstat(lock);
-    if (!currentLock.isDirectory() || currentLock.isSymbolicLink() ||
-        currentLock.dev !== lockInfo.dev || currentLock.ino !== lockInfo.ino) {
-      throw new Error("Instance directory changed; refusing cleanup.", { cause: error });
-    }
-    if (ownerFile) {
-      const createdOwner = await ownerFile.stat();
-      const currentOwner = await lstat(ownerPath);
-      // A failed write may leave only a prefix, before a valid owner identity exists.
-      if (!currentOwner.isFile() || currentOwner.isSymbolicLink() ||
-          currentOwner.dev !== createdOwner.dev || currentOwner.ino !== createdOwner.ino ||
-          currentOwner.size > Buffer.byteLength(ownerText) || !ownerText.startsWith(await readFile(ownerPath, "utf8"))) {
-        throw new Error("Instance owner changed; refusing cleanup.", { cause: error });
+    try {
+      const currentLock = await lstat(lock);
+      if (!currentLock.isDirectory() || currentLock.isSymbolicLink() ||
+          currentLock.dev !== lockInfo.dev || currentLock.ino !== lockInfo.ino) {
+        throw new Error("Instance directory changed; refusing cleanup.", { cause: error });
       }
-      await ownerFile.close();
-      await unlink(ownerPath);
+      if (ownerFile) {
+        const createdOwner = await ownerFile.stat();
+        const currentOwner = await lstat(ownerPath);
+        // A failed write may leave only a prefix, before a valid owner identity exists.
+        if (!currentOwner.isFile() || currentOwner.isSymbolicLink() ||
+            currentOwner.dev !== createdOwner.dev || currentOwner.ino !== createdOwner.ino ||
+            currentOwner.size > Buffer.byteLength(ownerText) || !ownerText.startsWith(await readFile(ownerPath, "utf8"))) {
+          throw new Error("Instance owner changed; refusing cleanup.", { cause: error });
+        }
+        await ownerFile.close();
+        await unlink(ownerPath);
+      }
+      // Non-recursive removal preserves any unexpected files instead of deleting them.
+      await rmdir(lock);
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError],
+        `Instance owner creation failed: ${error instanceof Error ? error.message : "Unknown error."} Cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : "Unknown error."}`);
     }
-    // Non-recursive removal preserves any unexpected files instead of deleting them.
-    await rmdir(lock);
     throw error;
   } finally { await ownerFile?.close(); }
   const release = async () => {

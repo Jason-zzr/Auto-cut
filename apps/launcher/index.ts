@@ -9,7 +9,14 @@ async function launch() {
   let host: Awaited<ReturnType<typeof startHost>>;
   try {
     host = await startHost({ ...instance, dist: fileURLToPath(new URL("../../dist/", import.meta.url)), openBrowser });
-  } catch (error) { await instance.release(); throw error; }
+  } catch (error) {
+    try { await instance.release(); }
+    catch (cleanupError) {
+      throw new AggregateError([error, cleanupError],
+        `Host startup failed: ${error instanceof Error ? error.message : "Unknown error."} Instance cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : "Unknown error."}`);
+    }
+    throw error;
+  }
   try { await instance.publish(host.port); }
   catch (error) { await host.stop(); throw error; }
   const stop = () => { void host.stop().catch(() => {
