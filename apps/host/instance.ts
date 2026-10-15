@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, rmdir, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, rmdir, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export type InstanceRecord = {
@@ -46,7 +46,34 @@ export async function claimInstance(directory: string) {
   const startedAt = new Date().toISOString();
   const proof = randomBytes(32).toString("hex");
   const ownerPath = join(lock, "owner.json");
-  await writeFile(ownerPath, JSON.stringify({ instanceId, pid: process.pid, startedAt }), { flag: "wx", mode: 0o600 });
+  const lockInfo = await lstat(lock);
+  const ownerText = JSON.stringify({ instanceId, pid: process.pid, startedAt });
+  let ownerFile: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    ownerFile = await open(ownerPath, "wx", 0o600);
+    await ownerFile.writeFile(ownerText);
+  } catch (error) {
+    const currentLock = await lstat(lock);
+    if (!currentLock.isDirectory() || currentLock.isSymbolicLink() ||
+        currentLock.dev !== lockInfo.dev || currentLock.ino !== lockInfo.ino) {
+      throw new Error("Instance directory changed; refusing cleanup.", { cause: error });
+    }
+    if (ownerFile) {
+      const createdOwner = await ownerFile.stat();
+      const currentOwner = await lstat(ownerPath);
+      // A failed write may leave only a prefix, before a valid owner identity exists.
+      if (!currentOwner.isFile() || currentOwner.isSymbolicLink() ||
+          currentOwner.dev !== createdOwner.dev || currentOwner.ino !== createdOwner.ino ||
+          currentOwner.size > Buffer.byteLength(ownerText) || !ownerText.startsWith(await readFile(ownerPath, "utf8"))) {
+        throw new Error("Instance owner changed; refusing cleanup.", { cause: error });
+      }
+      await ownerFile.close();
+      await unlink(ownerPath);
+    }
+    // Non-recursive removal preserves any unexpected files instead of deleting them.
+    await rmdir(lock);
+    throw error;
+  } finally { await ownerFile?.close(); }
   const release = async () => {
     const owner = JSON.parse(await readPrivateFile(ownerPath));
     if (owner.instanceId !== instanceId) throw new Error("Instance ownership changed; refusing cleanup.");
