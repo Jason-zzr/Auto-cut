@@ -1,6 +1,7 @@
 import { constants } from "node:fs";
 import { access, lstat, readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { parse, type DefaultTreeAdapterMap } from "parse5";
 
 export async function inspectWebResources(root: string) {
   const rootInfo = await lstat(root).catch(() => null);
@@ -25,6 +26,36 @@ export async function inspectWebResources(root: string) {
   }
   const html = await readFile(join(root, "index.html"), "utf8");
   if (!html.includes("</head>")) throw new Error("Editor HTML is invalid.");
+  const elements: DefaultTreeAdapterMap["element"][] = [];
+  const pending: DefaultTreeAdapterMap["node"][] = [parse(html)];
+  while (pending.length) {
+    const node = pending.pop()!;
+    if ("tagName" in node && node.namespaceURI === "http://www.w3.org/1999/xhtml") elements.push(node);
+    // Template contents and script text are not active resource elements.
+    if ("childNodes" in node) pending.push(...node.childNodes.toReversed());
+  }
+  // Only resolve URLs here; startup checks never fetch external resources.
+  const documentUrl = new URL("http://127.0.0.1/");
+  const base = elements.find((node) => node.tagName === "base" && node.attrs.some((attr) => attr.name === "href"));
+  const baseHref = base?.attrs.find((attr) => attr.name === "href")?.value;
+  const baseUrl = URL.parse(baseHref ?? "", documentUrl) ?? documentUrl;
+  for (const element of elements) {
+    const attrs = new Map(element.attrs.map((attr) => [attr.name, attr.value]));
+    const rel = (attrs.get("rel") ?? "").toLowerCase()
+      .replaceAll("\t", " ").replaceAll("\n", " ").replaceAll("\f", " ").replaceAll("\r", " ").split(" ");
+    const reference = element.tagName === "script" ? attrs.get("src") :
+      element.tagName === "link" && (rel.includes("stylesheet") || rel.includes("modulepreload")) ? attrs.get("href") : undefined;
+    if (reference === undefined) continue;
+    const resource = URL.parse(reference, baseUrl);
+    if (!resource) throw new Error(`Invalid editor resource URL: ${reference}`);
+    if (resource.origin !== documentUrl.origin) continue;
+    let name: string;
+    try { name = decodeURIComponent(resource.pathname.slice(1)); }
+    catch { throw new Error(`Invalid editor resource URL: ${reference}`); }
+    if (!files.has(name) || name.includes("\\") || name.split("/").some((part) => !part || part === "." || part === "..")) {
+      throw new Error(`Required editor resource missing: ${name}`);
+    }
+  }
   return { files, html: html.replace("</head>", '<meta name="autocut-host" content="1"></head>'),
     components: [
       { identity: "node", version: process.versions.node, platform: process.platform,
