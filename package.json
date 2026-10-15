@@ -14,6 +14,7 @@
   },
   "type": "module",
   "scripts": {
+    "host": "node apps/launcher/index.ts",
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "agent": "node scripts/timeline-command.mjs",
@@ -29,6 +30,7 @@
   },
   "dependencies": {
     "@diffusionstudio/vits-web": "^1.0.3",
+    "@fastify/static": "10.1.6",
     "@ffmpeg/core": "^0.12.10",
     "@ffmpeg/ffmpeg": "^0.12.15",
     "@ffmpeg/util": "^0.12.2",
@@ -39,6 +41,7 @@
     "@mediapipe/tasks-vision": "^1.0.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@phosphor-icons/react": "^2.1.10",
+    "fastify": "5.12.7",
     "fflate": "^0.8.3",
     "hangul-romanization": "^1.0.1",
     "kokoro-js": "^1.2.1",

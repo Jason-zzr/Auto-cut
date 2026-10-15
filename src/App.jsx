@@ -6,6 +6,7 @@ import { PreviewStage } from "./components/PreviewStage.jsx";
 import { VoicePanel } from "./components/VoicePanel.jsx";
 import { Timeline } from "./components/Timeline.jsx";
 import { Topbar } from "./components/Topbar.jsx";
+import { HostServicePanel } from "./components/HostServicePanel.jsx";
 import { AssetDragPreview, ExportProgressOverlay } from "./components/EditorOverlays.jsx";
 import { EditorSidebar } from "./components/EditorSidebar.jsx";
 import { FirstVisualGuide } from "./components/FirstVisualGuide.jsx";
@@ -104,7 +105,7 @@ import { getVisualPropertyTabIds } from "./lib/visualPropertyTabs.js";
 import { applyTimelineRipple } from "./lib/timelineRipple.js";
 import { COMPACT_WORKSPACE_QUERY } from "./config/editor.js";
 
-export function App() {
+export function App({ hostSession = null }) {
   const [uiLanguage, setUiLanguage] = useState(() => getStoredLanguage());
   const [mobilePanel, setMobilePanel] = useState("");
   const [mobilePanelClosing, setMobilePanelClosing] = useState(false);
@@ -1452,6 +1453,9 @@ export function App() {
     getSnapshot: getProjectSnapshot, getRuntime: getBrowserRuntimeProject,
     applyReview: applyBrowserReview, rippleEditing, setRippleEditing, seekTo, t,
   });
+  const isEditorBusy = () => Boolean(projectImportProgress || exporting || timelineClipDragRef.current || pointerAssetDragRef.current ||
+    isDragging || draggedAssetId || ["generating", "captioning"].includes(status) || visualSegments.some((clip) => clip.preparing) ||
+    visualOverlaySegments.some((clip) => clip.preparing) || visionJob.running || avatarJob.running || autoEdit.job.running);
   const webMcp = useWebMcpEditor({
     language: activeLanguage, visualSegments, visualOverlaySegments, audioSegments, musicSegments,
     sourceAudioBlob, musicBlob, audioBlob, rippleEditing, getProjectSnapshot,
@@ -1477,9 +1481,7 @@ export function App() {
     },
     undo: () => { pauseTimelineMedia(); undo(); },
     seek: (time) => { pauseTimelineMedia(); setIsPlaying(false); seekTo(time, { immediate: true }); },
-    isBusy: () => Boolean(projectImportProgress || exporting || timelineClipDragRef.current || pointerAssetDragRef.current ||
-      isDragging || draggedAssetId || ["generating", "captioning"].includes(status) || visualSegments.some((clip) => clip.preparing) ||
-      visualOverlaySegments.some((clip) => clip.preparing) || visionJob.running || avatarJob.running || autoEdit.job.running),
+    isBusy: isEditorBusy,
   });
 
   const guardAgentAi = (action) => (...args) => {
@@ -1522,6 +1524,8 @@ export function App() {
         }}
       />
       <Topbar
+        hostService={hostSession ? <HostServicePanel client={hostSession} language={activeLanguage}
+          isBusy={() => isEditorBusy() || webMcp.isAiRunning() || generationPlugins.job.running} /> : null}
         t={t}
         compactRail={compactRail}
         setCompactRail={setCompactRail}

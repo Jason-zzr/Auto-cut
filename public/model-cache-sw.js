@@ -361,6 +361,10 @@ self.addEventListener("activate", (event) => {
 });
 
 self.addEventListener("fetch", (event) => {
+  const url = new URL(event.request.url);
+  if (url.origin === self.location.origin && (url.pathname === "/healthz" ||
+      url.pathname === "/api" || url.pathname.startsWith("/api/") ||
+      url.pathname === "/internal" || url.pathname.startsWith("/internal/"))) return;
   if (event.request.mode === "navigate") {
     event.respondWith(networkFirst(event.request));
     return;

@@ -32,6 +32,7 @@ const COMMUNITY_LINKS = Object.freeze({
 });
 
 export function Topbar({
+  hostService = null,
   t,
   compactRail,
   setCompactRail,
@@ -218,6 +219,7 @@ export function Topbar({
       </div>
 
       <div className="topbar-actions">
+        {hostService}
         <nav className="topbar-community-links" aria-label={t("communityLinks", "社区链接")}>
           <a
             href={COMMUNITY_LINKS.discord}
