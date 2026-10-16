@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { normalizeTimelineMarkers } from "../lib/timelineMarkers.js";
 
 import {
@@ -311,6 +311,8 @@ export function useEditorHistory(d) {
   const timerRef = useRef(0);
   const restoredSignatureRef = useRef("");
   const checkpointNextRef = useRef(false);
+  const resetPendingRef = useRef(false);
+  const [resetVersion, setResetVersion] = useState(0);
   latestSnapshotRef.current = snapshot;
   if (!historyRef.current) historyRef.current = createEditorHistory(snapshot);
 
@@ -324,6 +326,12 @@ export function useEditorHistory(d) {
 
   useEffect(() => {
     const latestSnapshot = latestSnapshotRef.current;
+    if (resetPendingRef.current) {
+      resetPendingRef.current = false;
+      pendingRef.current = null; checkpointNextRef.current = false; restoredSignatureRef.current = "";
+      historyRef.current = createEditorHistory(latestSnapshot);
+      return;
+    }
     if (restoredSignatureRef.current === signature) {
       restoredSignatureRef.current = "";
       historyRef.current = { ...historyRef.current, current: latestSnapshot };
@@ -340,7 +348,7 @@ export function useEditorHistory(d) {
     }
     timerRef.current = window.setTimeout(commitPending, HISTORY_DEBOUNCE_MS);
     return () => window.clearTimeout(timerRef.current);
-  }, [commitPending, signature]);
+  }, [commitPending, signature, resetVersion]);
 
   useEffect(() => () => window.clearTimeout(timerRef.current), []);
 
@@ -393,5 +401,10 @@ export function useEditorHistory(d) {
     checkpointNextRef.current = true;
   }, [commitPending]);
 
-  return { redo, undo, checkpoint, signature };
+  const reset = useCallback(() => {
+    window.clearTimeout(timerRef.current);
+    pendingRef.current = null; resetPendingRef.current = true;
+    setResetVersion(value => value + 1);
+  }, []);
+  return { redo, undo, checkpoint, signature, reset };
 }

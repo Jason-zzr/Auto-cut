@@ -15,6 +15,7 @@ import {
   Play,
   ShieldCheck,
   SlidersHorizontal,
+  X,
   XLogo,
 } from "@phosphor-icons/react";
 
@@ -23,6 +24,8 @@ import { APP_LANGUAGES, saveLanguagePreference } from "../i18n.js";
 import { getPrimaryShortcutModifier, releasePointerActivatedFocus } from "../lib/editorShortcuts.js";
 import { formatStorageBytes, inspectModelCache } from "../lib/modelCacheInspection.js";
 import { ExportSettingsPanel } from "./ExportSettingsPanel.jsx";
+import { ProjectStoragePanel } from "./ProjectStoragePanel.jsx";
+import { ProjectMigrationPanel } from "./ProjectMigrationPanel.jsx";
 import { IconButton, Popover } from "./ui.jsx";
 
 const COMMUNITY_LINKS = Object.freeze({
@@ -33,6 +36,7 @@ const COMMUNITY_LINKS = Object.freeze({
 
 export function Topbar({
   hostService = null,
+  completeProject = null,
   t,
   compactRail,
   setCompactRail,
@@ -75,6 +79,8 @@ export function Topbar({
   const settingsAnchorRef = useRef(null);
   const modelCacheControlRef = useRef(null);
   const [modelCacheInspection, setModelCacheInspection] = useState({ state: "idle", result: null });
+  const [showProjectStorage, setShowProjectStorage] = useState(false);
+  const [showProjectMigration, setShowProjectMigration] = useState(false);
   const shortcutModifier = getPrimaryShortcutModifier();
   const shortcutRows = [
     ["markersAdd", "M"],
@@ -121,13 +127,15 @@ export function Topbar({
 
   return (
     <header className="topbar">
+      {showProjectStorage && completeProject?.projectId ? <ProjectStoragePanel key={completeProject.projectId} project={completeProject} onClose={() => setShowProjectStorage(false)} /> : null}
+      {showProjectMigration && completeProject ? <ProjectMigrationPanel project={completeProject} onClose={() => setShowProjectMigration(false)} /> : null}
       <div className="project-cluster">
         <IconButton label={t("collapseSidebar")} active={compactRail} onClick={() => setCompactRail((v) => !v)}>
           <SlidersHorizontal size={19} />
         </IconButton>
         <div>
           <div className="project-title-row">
-            <div className="project-title">{t("projectTitle")}</div>
+            <div className="project-title">{completeProject?.name || t("projectTitle")}</div>
             <div className="menu-anchor">
               <button className="project-file-button" type="button" onClick={() => setShowFileMenu((open) => !open)}>
                 {t("fileMenu")} <CaretDown size={13} />
@@ -144,6 +152,34 @@ export function Topbar({
                       <span className="file-menu-copy"><strong>{t("newProject")}</strong><small>{t("newProjectHint")}</small></span>
                     </button>
                     <div className="file-menu-divider" />
+                    {completeProject ? <button className="file-menu-action" type="button"
+                      disabled={completeProject.status === "preparing" || completeProject.status === "saving"}
+                      onClick={() => { setShowFileMenu(false); void completeProject.open(); }}>
+                      <span className="file-menu-icon"><FileArrowUp size={17} /></span>
+                      <span className="file-menu-copy"><strong>打开完整项目</strong></span>
+                    </button> : null}
+                    {completeProject ? <button className="file-menu-action" type="button"
+                      disabled={completeProject.status === "preparing" || completeProject.status === "saving"}
+                      onClick={() => { setShowFileMenu(false); void completeProject.save(); }}>
+                      <span className="file-menu-icon"><FileArrowDown size={17} /></span>
+                      <span className="file-menu-copy"><strong>{completeProject.status === "error" ? "重试完整项目保存" : "保存完整项目"}</strong></span>
+                    </button> : null}
+                    {completeProject ? <button className="file-menu-action" type="button"
+                      onClick={() => { setShowFileMenu(false); setShowProjectMigration(true); }}>
+                      <span className="file-menu-copy"><strong>完整项目导入 / 导出</strong></span>
+                    </button> : null}
+                    {completeProject?.projectId ? <button className="file-menu-action" type="button"
+                      disabled={completeProject.storageBusy}
+                      onClick={() => { setShowFileMenu(false); setShowProjectStorage(true); }}>
+                      <span className="file-menu-icon"><Database size={17} /></span>
+                      <span className="file-menu-copy"><strong>项目素材与回收站</strong></span>
+                    </button> : null}
+                    {completeProject?.name ? <button className="file-menu-action" type="button"
+                      disabled={completeProject.busy()}
+                      onClick={() => { setShowFileMenu(false); void completeProject.closeProject(); }}>
+                      <span className="file-menu-icon"><X size={17} /></span>
+                      <span className="file-menu-copy"><strong>关闭完整项目</strong></span>
+                    </button> : null}
                     <button className="file-menu-action" type="button" onClick={() => handleImportProject()}>
                       <span className="file-menu-icon"><FileArrowUp size={17} /></span>
                       <span className="file-menu-copy"><strong>{t("importProject")}</strong><small>{t("importProjectHint")}</small></span>
@@ -167,9 +203,11 @@ export function Topbar({
               <input ref={projectFileInputRef} className="project-file-input" type="file" accept="application/zip,.timeline" onChange={(event) => event.target.files?.[0] && handleImportProject(event.target.files[0])} />
             </div>
           </div>
-          <div className="autosave">
+          <div className="autosave" title={completeProject?.error || undefined} role="status">
             <ShieldCheck size={13} weight="fill" />
-            {t("autosave")} · {lastSaved}
+            {completeProject ? completeProject.error || (completeProject.status === "opened" ? "已打开保存的项目" : completeProject.status === "dirty" ? "有未保存的修改" : completeProject.status === "preparing" ? "正在准备完整项目…" : completeProject.status === "saving"
+              ? "正在保存完整项目…" : completeProject.lastSaved ? `${completeProject.name} · 已保存 ${new Date(completeProject.lastSaved).toLocaleTimeString()}` : "尚未保存完整项目")
+              : <>{t("autosave")} · {lastSaved}</>}
           </div>
         </div>
       </div>

@@ -1,4 +1,5 @@
 import { reverseAudioBlob } from "./media.js";
+import { loadProjectMediaBlob } from "./projectSnapshot.js";
 
 export function normalizeAudioPlaybackRate(value) {
   return Math.max(0.25, Math.min(4, Number(value) || 1));
@@ -49,7 +50,9 @@ export function createAudioClipActions(d) {
     d.audioSegmentRefs.current.get(id)?.pause();
     d.setAudioSegments((items) => items.map((item) => item.id === id ? { ...item, reversing: true } : item));
     try {
-      const originalBlob = segment.originalBlob || segment.blob; const originalPeaks = segment.originalPeaks || segment.peaks;
+      const originalBlob = await loadProjectMediaBlob(segment,
+        segment.originalBlob || segment.projectMedia?.bindings?.originalBlob ? "originalBlob" : "blob");
+      const originalPeaks = segment.originalPeaks || segment.peaks || [];
       const blob = segment.reversed ? originalBlob : await reverseAudioBlob(originalBlob);
       const peaks = segment.reversed ? originalPeaks : [...originalPeaks].reverse(); const url = URL.createObjectURL(blob);
       URL.revokeObjectURL(segment.url);

@@ -19,14 +19,31 @@ export async function connectHostSession() {
     credential = null;
     try { sessionStorage.removeItem(STORAGE_KEY); } catch { /* Memory-only storage remains supported. */ }
   };
-  const request = async (path, body, key) => {
+  const request = async (path, body, key, options = {}) => {
+    if (!path.startsWith("/api/v1/") || new URL(path, location.origin).origin !== location.origin) {
+      throw new Error("Invalid local service path.");
+    }
     const headers = { "Content-Type": "application/json", "X-AutoCut-Protocol-Version": "1" };
     if (credential) headers.Authorization = `Bearer ${credential.bearer}`;
     if (key) headers["Idempotency-Key"] = key;
-    const response = await fetch(path, { method: body === undefined ? "GET" : "POST", headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
+    if (options.revision !== undefined) {
+      if (!Number.isSafeInteger(options.revision) || options.revision < 1) throw new Error("Invalid asset revision.");
+      headers["If-Match"] = `"${options.revision}"`;
+    }
+    if (options.metadata) {
+      headers["Content-Type"] = "application/octet-stream";
+      const bytes = new TextEncoder().encode(JSON.stringify(options.metadata));
+      headers["X-AutoCut-Import-Metadata"] = btoa(Array.from(bytes, (byte) => String.fromCharCode(byte)).join(""))
+        .replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+      if (headers["X-AutoCut-Import-Metadata"].length > 8192) throw new Error("Import metadata is too large.");
+    }
+    const signal = options.signal || AbortSignal.timeout(options.metadata ? 300_000 : path === "/api/v1/file-selections" ? 130_000 : 10_000);
+    const method = options.method || (body === undefined ? "GET" : "POST");
+    const requestBody = body === undefined && method === "DELETE" ? {} : body;
+    const response = await fetch(path, { method, headers,
+      body: requestBody === undefined ? undefined : options.metadata ? requestBody : JSON.stringify(requestBody),
       mode: "same-origin", credentials: "omit", cache: "no-store", redirect: "error",
-      signal: AbortSignal.timeout(10_000) });
+      signal });
     const envelope = await response.json();
     if (!response.ok || envelope.ok !== true || envelope.meta?.protocolVersion !== 1) {
       const code = envelope.error?.code || "SERVICE_NOT_READY";
@@ -38,13 +55,16 @@ export async function connectHostSession() {
     return envelope.data;
   };
   const refresh = async () => {
+    if (closed) return;
     const session = await request("/api/v1/session");
+    if (closed) return;
     if (!credential || session.instanceId !== credential.instanceId || session.pageSessionId !== credential.pageSessionId) {
       forget();
       update({ connection: "expired" });
       throw new Error("Instance changed. Reopen from the launcher; keep this page to export edits.");
     }
     const components = await request("/api/v1/components");
+    if (closed) return;
     if (!Array.isArray(components.items)) throw new Error("Invalid component response.");
     update({ session, components: components.items, connection: session.state === "Draining" ? "draining" : "connected", error: "" });
   };
@@ -71,6 +91,17 @@ export async function connectHostSession() {
     forget(); throw new Error("请从 Auto-cut 启动器重新打开页面。当前链接无有效会话。 / Reopen from the Auto-cut launcher.");
   }
   await refresh();
+
+  const mediaCredential = (event) => {
+    if (event.source !== navigator.serviceWorker?.controller ||
+        event.data?.type !== "AUTOCUT_MEDIA_CREDENTIAL" ||
+        typeof event.data.requestId !== "string" || !event.ports[0]) return;
+    const port = event.ports[0];
+    port.postMessage({ requestId: event.data.requestId,
+      bearer: !closed && credential && Date.parse(credential.expiresAt) > Date.now() ? credential.bearer : null });
+    port.close();
+  };
+  navigator.serviceWorker?.addEventListener("message", mediaCredential);
 
   async function subscribe() {
     if (closed || !credential) return;
@@ -132,6 +163,12 @@ export async function connectHostSession() {
     getSnapshot: () => snapshot,
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     refresh,
+    request,
+    upload(projectId, blob, metadata, key, signal) {
+      if (!(blob instanceof Blob)) throw new Error("A media Blob is required.");
+      return request(`/api/v1/projects/${encodeURIComponent(projectId)}/asset-imports`, blob, key,
+        { metadata: { ...metadata, sizeBytes: blob.size }, signal });
+    },
     async stop(event, isBusy, confirmationText) {
       if (!event?.isTrusted) throw new Error("Use the local service button to confirm.");
       if (isBusy()) throw new Error("Wait for the current operation or cancel it using its original controls.");
@@ -143,8 +180,15 @@ export async function connectHostSession() {
       }
       if (isBusy()) { pendingExit = null; throw new Error("The page became busy. Review the exit again later."); }
       await request("/api/v1/application/exit-requests", { mode: "normal", confirmationId: pendingExit.confirmationId }, pendingExit.key);
+      // The accepted shutdown will close the stream; do not report or retry that expected disconnect.
+      closed = true;
+      clearTimeout(retryTimer);
+      streamController?.abort();
       update({ connection: "draining", error: "" });
     },
-    close() { closed = true; clearTimeout(retryTimer); streamController?.abort(); listeners.clear(); },
+    close() {
+      closed = true; clearTimeout(retryTimer); streamController?.abort(); listeners.clear();
+      navigator.serviceWorker?.removeEventListener("message", mediaCredential);
+    },
   };
 }

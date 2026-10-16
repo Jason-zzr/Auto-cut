@@ -88,6 +88,7 @@ export function createVisualOverlaySegment(asset, start = 0, options = {}) {
     kind: asset?.kind || "",
     src: asset?.src || "",
     blob: asset?.blob,
+    ...(asset?.projectMedia ? { projectMedia: asset.projectMedia } : {}),
     generatedBy: asset?.generatedBy || "",
     generationMetadata: asset?.generationMetadata ? { ...asset.generationMetadata } : undefined,
     width: Number(asset?.width) || 0,

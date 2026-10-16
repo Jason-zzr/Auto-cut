@@ -7,6 +7,7 @@ import { normalizeSmartFrame } from "../lib/smartFrame.js";
 import { normalizeTrackLocks, normalizeTrackVisibility } from "../lib/projectTrackState.js";
 import { normalizeTimelineMarkers } from "../lib/timelineMarkers.js";
 import { PROJECT_IMPORT_COPY } from "../i18nProjectImport.js";
+import { captureProjectState, loadProjectMediaBlob, restoreProjectSnapshot } from "../lib/projectSnapshot.js";
 
 const waitForProjectPaint = () => new Promise((resolve) => {
   requestAnimationFrame(() => requestAnimationFrame(resolve));
@@ -16,6 +17,62 @@ export function useProjectFiles(deps) {
   const [projectImportProgress, setProjectImportProgress] = useState(null);
   const importingRef = useRef(false);
   const commandStateRef = useRef({ schemaVersion: 1, revision: 0, appliedOperationIds: [] });
+  const captureCompleteProject = useCallback(() => captureProjectState({
+    ...deps, commandState: commandStateRef.current, sourceVoiceColorOriginal: deps.sourceVoiceColorOriginalRef?.current ?? null,
+  }), [deps]);
+  const prepareCompleteProject = useCallback(async (saved, projectId) => {
+    const restored = await restoreProjectSnapshot(saved, projectId);
+    if (typeof restored.script !== "string" || !Array.isArray(restored.visualSegments) ||
+        !Array.isArray(restored.audioSegments) || !Array.isArray(restored.userAssets)) throw new Error("项目缺少完整编辑状态。");
+    // Active audio needs bytes for the existing audio controls; unused library media stays lazy.
+    const loaded = new Map();
+    const audio = (item, field = "blob") => {
+      const ref = item.projectMedia?.bindings?.[field];
+      const key = ref ? JSON.stringify(ref) : item[field] || item.url;
+      if (!loaded.has(key)) loaded.set(key, loadProjectMediaBlob(item, field));
+      return loaded.get(key);
+    };
+    for (const segment of restored.audioSegments) {
+      segment.blob = await audio(segment);
+      segment.peaks = [];
+      if (segment.projectMedia?.bindings?.voiceColorOriginalBlob) {
+        segment.voiceColorOriginalBlob = await audio(segment, "voiceColorOriginalBlob");
+        segment.voiceColorOriginalPeaks = [];
+      }
+    }
+    for (const field of ["musicBlob", "sourceAudioBlob"]) {
+      if (restored.projectMedia.bindings[field]) restored[field] = await audio(restored, field);
+    }
+    restored.sourceVoiceColorOriginal ??= null;
+    if (restored.sourceVoiceColorOriginal) {
+      const original = restored.sourceVoiceColorOriginal;
+      if (!deps.sourceVoiceColorOriginalRef || typeof original !== "object" || Array.isArray(original) ||
+          typeof original.name !== "string" || !Number.isFinite(original.duration) || original.duration < 0) {
+        throw new Error("项目中的原始音色备份无效。");
+      }
+      original.blob = await audio(original);
+      original.peaks = [];
+    }
+    restored.musicPeaks = []; restored.sourceAudioPeaks = [];
+    delete restored.imageBlob;
+    const assignments = [];
+    for (const [key, value] of Object.entries(restored)) {
+      if (["commandState", "projectMedia", "audioBlob", "audioUrl", "audioDuration", "imageBlob", "sourceVoiceColorOriginal"].includes(key)) continue;
+      const setter = deps[`set${key[0].toUpperCase()}${key.slice(1)}`];
+      if (typeof setter !== "function") throw new Error(`无法恢复编辑字段：${key}`);
+      assignments.push([setter, value]);
+    }
+    return { captured: captureProjectState(restored), apply() {
+      deps.pauseTimelineMedia?.(); deps.setIsPlaying(false);
+      commandStateRef.current = restored.commandState;
+      for (const [setter, value] of assignments) setter(value);
+      deps.musicUrlRef.current = restored.musicUrl;
+      deps.sourceAudioUrlRef.current = restored.sourceAudioUrl;
+      if (deps.sourceVoiceColorOriginalRef) deps.sourceVoiceColorOriginalRef.current = restored.sourceVoiceColorOriginal;
+      deps.markTimelineViewRestored?.(true);
+      deps.clearAllVisionState(); deps.resetHistory(); deps.setShowFileMenu(false);
+    } };
+  }, [deps]);
   const getProjectSnapshot = useCallback(() => {
     const visualSegments = deps.visualSegments.map(({ blob, trackFrames, src, cutoutVisual, enhancement: _enhancement, ...segment }) => segment);
     const visualOverlaySegments = deps.visualOverlaySegments.map(({ blob, src, ...segment }) => segment);
@@ -59,18 +116,20 @@ export function useProjectFiles(deps) {
     } catch (error) { deps.notify(error instanceof Error ? `工程导出失败：${error.message}` : "工程导出失败"); }
   }, [deps, createCurrentArchive]);
 
-  const handleNewProject = useCallback(() => {
+  const handleNewProject = useCallback((options = {}) => {
     if (importingRef.current) return;
-    if (!window.confirm("新建工程将清空当前时间线，是否继续？")) return;
+    if (!options.confirmed && !window.confirm("新建工程将清空当前时间线，是否继续？")) return;
     commandStateRef.current = { schemaVersion: 1, revision: 0, appliedOperationIds: [] };
     deps.setScript(DEFAULT_SCRIPT); deps.setCaptionSegments(createCaptionSegments(DEFAULT_SCRIPT));
     deps.setSelectedSegmentId(""); deps.clearImageTrack(""); deps.clearAudioTrack("");
     deps.setVisualOverlaySegments([]); deps.setSelectedVisualOverlayId("");
     deps.clearSourceAudioTrack(""); deps.clearMusicTrack(""); deps.setStickerSegments([]);
+    if (deps.sourceVoiceColorOriginalRef) deps.sourceVoiceColorOriginalRef.current = null;
     deps.setTimelineMarkers?.([]);
     deps.setSelectedStickerSegmentId(""); deps.clearAllVisionState(); deps.setCurrentTime(0);
     deps.setTimelineHorizon(DEFAULT_TIMELINE_DURATION_SECONDS); deps.setTimelineZoom(1);
-    deps.setShowFileMenu(false); deps.notify("已新建空白工程");
+    if (options.complete) { deps.setUserAssets([]); deps.resetHistory(); }
+    deps.setShowFileMenu(false); deps.notify(options.closed ? "已关闭完整项目" : "已新建空白工程");
   }, [deps]);
 
   const handleImportProject = useCallback(async (file) => {
@@ -275,5 +334,5 @@ export function useProjectFiles(deps) {
     }
   }, [deps]);
 
-  return { projectImportProgress, handleExportProject, handleImportProject, handleNewProject, getProjectSnapshot, createCurrentArchive };
+  return { projectImportProgress, handleExportProject, handleImportProject, handleNewProject, getProjectSnapshot, createCurrentArchive, captureCompleteProject, prepareCompleteProject };
 }

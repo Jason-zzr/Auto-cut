@@ -73,6 +73,7 @@ export function getVisualAssetPayload(asset) {
     name: asset.name ?? "",
     meta: asset.meta ?? "",
     blob: asset.blob ?? null,
+    ...(asset.projectMedia ? { projectMedia: asset.projectMedia } : {}),
     compatibilityAudioBlob: asset.compatibilityAudioBlob ?? null,
     volume: Math.max(0, Math.min(4, Number(asset.volume ?? 1))),
     spatialEffect: asset.spatialEffect ?? "original",

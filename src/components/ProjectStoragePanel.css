@@ -1,0 +1,13 @@
+.project-storage-dialog { width: min(720px, calc(100vw - 40px)); max-height: 85vh; overflow: auto; padding: 24px; border: 1px solid #46505c; border-radius: 16px; background: #171d25; color: #eef2f6; }
+.project-storage-dialog::backdrop { background: #0009; }
+.project-storage-heading, .project-storage-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.project-storage-dialog h2, .project-storage-dialog h3 { margin: 8px 0 16px; }
+.project-storage-dialog section { margin-top: 24px; }
+.project-storage-dialog ul { list-style: none; margin: 0; padding: 0; }
+.project-storage-dialog li { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid #343c48; }
+.project-storage-dialog li > div { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.project-storage-dialog small { display: block; margin-top: 5px; color: #bdc9d6; }
+.project-storage-dialog button { padding: 7px 12px; border: 1px solid #586575; border-radius: 7px; background: #293443; color: inherit; cursor: pointer; }
+.project-storage-dialog button:disabled { opacity: .5; cursor: default; }
+.project-storage-dialog button:focus-visible, .project-storage-dialog input:focus-visible { outline: 2px solid #52dcca; outline-offset: 3px; }
+.project-storage-dialog [role="alert"] { color: #ffb8ae; }

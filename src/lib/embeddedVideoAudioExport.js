@@ -1,6 +1,7 @@
 import { concatenateAudioBlobs, decodeWaveform, extractAudioFromVideo } from "./media.js";
 import { isExportAbortError, throwIfExportAborted } from "./exportCancellation.js";
 import { getVisualSegmentTimeline } from "./timeline.js";
+import { loadProjectMediaBlob } from "./projectSnapshot.js";
 
 const getAssetKey = (segment) => segment?.assetId || segment?.src || segment?.id || "";
 
@@ -48,24 +49,16 @@ export async function prepareEmbeddedVideoAudio(visualSegments = [], onProgress,
       phaseParams: { current: index + 1, total: uniqueAssets.length },
     });
     try {
-      const sourceBlob = segment.blob instanceof Blob
-        ? segment.blob
-        : segment.src
-          ? await fetch(segment.src, { signal }).then((response) => {
-              if (!response.ok) throw new Error(`无法读取视频素材：${response.status}`);
-              return response.blob();
-            })
-          : null;
-      if (!sourceBlob) continue;
-      const blob = segment.compatibilityAudioBlob instanceof Blob
-        ? segment.compatibilityAudioBlob
-        : await extractAudioFromVideo(sourceBlob, segment.name || "source-video.mp4");
+      const blob = segment.compatibilityAudioBlob instanceof Blob || segment.projectMedia?.bindings?.compatibilityAudioBlob
+        ? await loadProjectMediaBlob(segment, "compatibilityAudioBlob", signal)
+        : await extractAudioFromVideo(await loadProjectMediaBlob(segment, "blob", signal), segment.name || "source-video.mp4");
       throwIfExportAborted(signal);
       const decoded = await decodeWaveform(blob, 24);
       throwIfExportAborted(signal);
       if (decoded.duration > 0) extracted.push({ key, blob, duration: decoded.duration });
     } catch (error) {
       if (isExportAbortError(error)) throw error;
+      if (segment.projectMedia) throw error;
       console.warn("Embedded video audio extraction skipped", segment.name || segment.id, error);
     }
   }

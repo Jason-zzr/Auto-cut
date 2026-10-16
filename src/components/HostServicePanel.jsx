@@ -15,7 +15,7 @@ export function HostServicePanel({ client, isBusy, language }) {
   const busy = isBusy();
   const status = connected ? (zh ? "已连接" : "Connected") :
     snapshot.connection === "expired" ? (zh ? "会话过期，请重新启动入口" : "Session expired; reopen launcher") :
-      snapshot.connection === "draining" ? (zh ? "正在停止" : "Stopping") : (zh ? "未连接" : "Disconnected");
+      snapshot.connection === "draining" ? (zh ? "停止请求已接受，请从启动器重新打开" : "Stop request accepted; reopen from the launcher") : (zh ? "未连接" : "Disconnected");
   useEffect(() => {
     const warnBeforeLeaving = (event) => {
       event.preventDefault();
@@ -37,7 +37,7 @@ export function HostServicePanel({ client, isBusy, language }) {
           <small>{item.detail}</small>
         </div>)}
         {error || snapshot.error ? <p role="alert">{error || snapshot.error}</p> : null}
-        <button type="button" disabled={pending || snapshot.connection === "expired"} onClick={async () => {
+        <button type="button" disabled={pending || snapshot.connection === "expired" || snapshot.connection === "draining"} onClick={async () => {
           setPending(true); setError("");
           try { await client.refresh(); } catch (failure) { setError(failure.message); }
           finally { setPending(false); }

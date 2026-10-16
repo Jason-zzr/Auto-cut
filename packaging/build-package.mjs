@@ -7,6 +7,7 @@ import { dirname, join, resolve, relative, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { buildHost } from "./build-host.mjs";
+import { buildStorage } from "./build-storage.mjs";
 import { inspectWebResources } from "../apps/host/components.ts";
 
 const execute = promisify(execFile);
@@ -59,6 +60,7 @@ const application = mac ? join(output, "Auto-cut.app") : join(output, "Auto-cut"
 const resources = mac ? join(application, "Contents", "Resources") : join(application, "resources");
 await mkdir(dirname(resources), { recursive: true });
 await buildHost(resources);
+if (mac) await buildStorage(resources);
 await cp(dist, join(resources, "dist"), { recursive: true, errorOnExist: true, force: false });
 await inspectWebResources(join(resources, "dist"));
 await writeFile(join(resources, "NODE-LICENSE"), runtimeLicense);

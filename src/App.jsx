@@ -26,6 +26,7 @@ import { usePreviewFrameSize } from "./hooks/usePreviewFrameSize.js";
 import { useEditorCatalog } from "./hooks/useEditorCatalog.js";
 import { useToast } from "./hooks/useToast.js";
 import { useProjectFiles } from "./hooks/useProjectFiles.js";
+import { useCompleteProject } from "./hooks/useCompleteProject.js";
 import { useAutosaveTimestamp } from "./hooks/useAutosaveTimestamp.js";
 import { useVisionAnalysis } from "./hooks/useVisionAnalysis.js";
 import { useSmartFrame } from "./hooks/useSmartFrame.js";
@@ -249,7 +250,7 @@ export function App({ hostSession = null }) {
     setSelectedLibraryAssetId,
     setUserAssets,
   });
-  const { redo, undo, checkpoint: checkpointHistory, signature: historySignature } = useEditorHistory({
+  const { redo, undo, checkpoint: checkpointHistory, signature: historySignature, reset: resetHistory } = useEditorHistory({
     autoRatioSourceKeyRef,
     timelineMarkers, setTimelineMarkers, ratioId, setRatioId,
     captionStylePresetId, captionStylePresets, setCaptionStylePresetId, setCaptionStylePresets,
@@ -995,12 +996,18 @@ export function App({ hostSession = null }) {
       if (target.url && target.url !== target.voiceColorOriginalUrl) {
         URL.revokeObjectURL(target.url); imageUrlRefs.current.delete(target.url);
       }
-      setAudioSegments((items) => items.map((item) => item.id === segment.id ? {
-        ...item, blob: item.voiceColorOriginalBlob, url: item.voiceColorOriginalUrl,
-        peaks: item.voiceColorOriginalPeaks, name: item.voiceColorOriginalName,
-        sourceKind: item.voiceColorOriginalSourceKind, voiceColorOriginalBlob: null,
-        voiceColorOriginalUrl: "", voiceColorOriginalPeaks: null, voiceColorOriginalName: "", voiceColorOriginalSourceKind: "",
-      } : item));
+      setAudioSegments((items) => items.map((item) => {
+        if (item.id !== segment.id) return item;
+        const bindings = { ...item.projectMedia?.bindings };
+        delete bindings.voiceColorOriginalBlob; delete bindings.voiceColorOriginalUrl;
+        return {
+          ...item, ...(item.projectMedia ? { projectMedia: { ...item.projectMedia, bindings } } : {}),
+          blob: item.voiceColorOriginalBlob, url: item.voiceColorOriginalUrl,
+          peaks: item.voiceColorOriginalPeaks, name: item.voiceColorOriginalName,
+          sourceKind: item.voiceColorOriginalSourceKind, voiceColorOriginalBlob: null,
+          voiceColorOriginalUrl: "", voiceColorOriginalPeaks: null, voiceColorOriginalName: "", voiceColorOriginalSourceKind: "",
+        };
+      }));
     } else if (targetTrack === "source" && sourceVoiceColorOriginalRef.current) {
       sourceAudioRef.current?.pause?.();
       const original = sourceVoiceColorOriginalRef.current; sourceAudioUrlRef.current = original.url;
@@ -1313,8 +1320,17 @@ export function App({ hostSession = null }) {
     return { ...overlay, depthAnalysis: resolveDepthAnalysisAtTime(depthRecord, sourceTime) };
   }), [currentTime, depthRecords, previewVisualOverlays]);
 
-  const { projectImportProgress, getProjectSnapshot, createCurrentArchive, handleExportProject, handleImportProject, handleNewProject } = useProjectFiles({
+  const { projectImportProgress, getProjectSnapshot, createCurrentArchive, handleExportProject, handleImportProject, handleNewProject, captureCompleteProject, prepareCompleteProject } = useProjectFiles({
+    sourceVoiceColorOriginalRef,
     language: activeLanguage, pauseTimelineMedia, setIsPlaying,
+    imageSrc, imageName, imageMeta, visualType, imageDuration, imageClipCount,
+    audioUrl, musicUrl, sourceAudioUrl, userAssets, timelineHorizon, currentTime,
+    selectedTrack, selectedSegmentId, selectedVisualSegmentId, selectedVisualOverlayId, selectedStickerSegmentId, selectedAudioSegmentId,
+    captionStylePresetId, captionStylePresets,
+    setCaptionStylePresetId, setCaptionStylePresets, setUserAssets, setSelectedTrack, setSelectedVisualSegmentId,
+    setImageSrc, setImageName, setImageMeta, setVisualType, resetHistory, musicUrlRef, sourceAudioUrlRef,
+    setMusicBlob, setMusicUrl, setMusicName, setMusicDuration, setMusicPeaks,
+    setSourceAudioBlob, setSourceAudioUrl, setSourceAudioName, setSourceAudioDuration, setSourceAudioPeaks, setSourceAudioStart,
     timelineMarkers, setTimelineMarkers,
     audioBlob, audioDuration, audioSegments, captionPlacement, captionPosition, captionSegments, captionSize,
     captionStyle, captionsEnabled, captionStyleFallback: captionStyle, clearAllVisionState,
@@ -1333,6 +1349,8 @@ export function App({ hostSession = null }) {
     sourceAudioAssetId, sourceAudioLinked, sourceAudioName, sourceAudioStart, sourceAudioVolume, sourceAudioSpatialEffect, sourceAudioSpatialAmount, speed, stickerSegments,
     timelineZoom, trackLocks, trackVisibility, visualSegments, visualOverlaySegments, volume,
   });
+  const completeProject = useCompleteProject({ hostSession, captureCompleteProject, prepareCompleteProject, handleNewProject, notify,
+    isEditorBusy: () => isEditorBusy() || webMcp.isAiRunning() || generationPlugins.job.running });
 
   const {
     activeTimelineClipDrag, audioClipPercent, displayedCaptionSegments,
@@ -1524,8 +1542,9 @@ export function App({ hostSession = null }) {
         }}
       />
       <Topbar
+        completeProject={completeProject}
         hostService={hostSession ? <HostServicePanel client={hostSession} language={activeLanguage}
-          isBusy={() => isEditorBusy() || webMcp.isAiRunning() || generationPlugins.job.running} /> : null}
+          isBusy={() => isEditorBusy() || webMcp.isAiRunning() || generationPlugins.job.running || completeProject?.busy()} /> : null}
         t={t}
         compactRail={compactRail}
         setCompactRail={setCompactRail}
@@ -1561,7 +1580,7 @@ export function App({ hostSession = null }) {
         toggleTrackVisibility={toggleTrackVisibility}
         showFileMenu={showFileMenu}
         setShowFileMenu={setShowFileMenu}
-        handleNewProject={handleNewProject}
+        handleNewProject={completeProject ? () => { void completeProject.newProject(); } : handleNewProject}
         handleExportProject={handleExportProject}
         handleImportProject={handleImportProject}
         projectFileInputRef={projectFileInputRef}

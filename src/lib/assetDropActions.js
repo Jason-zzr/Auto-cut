@@ -1,6 +1,7 @@
 import { decodeWaveform, extractVideoTrackFrames, getVideoTrackImportFrameBudget } from "./media.js";
 import { getRemoteAssetBlob } from "./remoteAssetCache.js";
 import { getVisualInsertionHover, resolveVisualInsertion } from "./visualDropInsertion.js";
+import { loadProjectMediaBlob } from "./projectSnapshot.js";
 
 function getRemoteVideoImportFrameBudget(duration) {
   const seconds = Math.max(0, Number(duration) || 0);
@@ -125,20 +126,19 @@ export function createAssetDropActions(d) {
       return;
     }
     if (track === "audio") {
-      if (!asset.blob) {
-        d.notify(tr("audioAssetUnavailable", "当前音频素材不可用，请重新上传"));
-        return;
-      }
+      let blob;
+      try { blob = await loadProjectMediaBlob(asset); }
+      catch (error) { d.notify(error.message); return; }
       const hasValidDuration = Number.isFinite(Number(asset.duration)) && Number(asset.duration) > 0;
       const decoded = asset.peaks?.length && hasValidDuration
         ? { duration: Number(asset.duration), peaks: asset.peaks }
-        : await decodeWaveform(asset.blob, 96);
+        : await decodeWaveform(blob, 96);
       const dropStart = Number.isFinite(Number(options.startTime))
         ? Number(options.startTime)
         : Number.isFinite(Number(options.percent)) && Number.isFinite(Number(d.timelineDuration))
           ? Math.max(0, Number(options.percent) / 100 * Number(d.timelineDuration))
           : undefined;
-      d.replaceAudio(asset.blob, decoded.duration, decoded.peaks, "音频已写入配音轨", {
+      d.replaceAudio(blob, decoded.duration, decoded.peaks, "音频已写入配音轨", {
         sourceKind: "upload",
         assetId: asset.id,
         name: asset.name,

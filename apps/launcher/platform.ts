@@ -7,6 +7,36 @@ import { promisify } from "node:util";
 
 const execute = promisify(execFile);
 
+export async function selectLocalPaths(kind: "file" | "directory", multiple: boolean, mediaKinds?: ("image" | "video" | "audio")[]): Promise<string[]> {
+  if (process.platform !== "darwin") throw new Error("Native file selection is not yet available on this platform.");
+  const script = `function run(args) {
+    const app = Application.currentApplication();
+    app.includeStandardAdditions = true;
+    try {
+      const options = { withPrompt: "选择 Auto-cut 项目或素材", multipleSelectionsAllowed: args[1] === "true" };
+      const kinds = JSON.parse(args[2]);
+      if (args[0] === "file" && kinds.length) options.ofType = kinds;
+      const result = args[0] === "directory" ? app.chooseFolder(options) : app.chooseFile(options);
+      const paths = Array.isArray(result) ? result : [result];
+      return JSON.stringify({ paths: paths.map(function(path) { return path.toString(); }) });
+    } catch (error) {
+      if (error.errorNumber === -128) return JSON.stringify({ cancelled: true });
+      throw error;
+    }
+  }`;
+  const types = { image: "public.image", video: "public.movie", audio: "public.audio" };
+  const { stdout } = await execute("/usr/bin/osascript", ["-l", "JavaScript", "-e", script, kind, String(multiple), JSON.stringify((mediaKinds ?? []).map(value => types[value]))],
+    { timeout: 120_000, maxBuffer: 65_536 });
+  const result: unknown = JSON.parse(stdout);
+  if (result && typeof result === "object" && "cancelled" in result && result.cancelled === true) return [];
+  if (!result || typeof result !== "object" || !("paths" in result) || !Array.isArray(result.paths) ||
+      !result.paths.length || result.paths.length > 256 || (!multiple && result.paths.length !== 1) ||
+      result.paths.some(path => typeof path !== "string" || !isAbsolute(path) || path.includes("\0"))) {
+    throw new Error("File selection returned an invalid result.");
+  }
+  return result.paths;
+}
+
 export async function machineDirectory(): Promise<string> {
   if (Number(process.versions.node.split(".")[0]) !== 24) {
     throw new Error("Auto-cut host requires Node 24. No runtime was installed automatically.");
