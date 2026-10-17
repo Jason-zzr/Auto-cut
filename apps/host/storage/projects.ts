@@ -16,6 +16,7 @@ import { createMigrationExports } from "./migration-exports.ts";
 import { prepareAnalysis } from "./analyses.ts";
 import { prepareScript } from "./scripts.ts";
 import { preparePlanningTask } from "./planning-tasks.ts";
+import { prepareExecutionPlan } from "./execution-plans.ts";
 import packageMetadata from "../../../package.json" with { type: "json" };
 
 type Project = { projectId: string; name: string; files: Awaited<ReturnType<typeof openProjectFiles>>;
@@ -49,7 +50,7 @@ export function createProjects(instanceId: string, executable: string) {
         idempotencyKey: recovery.key, request: recovery.choice, editorSnapshotId: null, editorSequence: null }, prepareRecovery(files, projectId)) : null;
       for (const save of commits.pending()) {
         if (!["queued", "writing"].includes(commits.get(save.saveId).status)) continue;
-        const prepare = save.route === "script-planning" ? preparePlanningTask(files, projectId) : save.route === "review-script" ? prepareScript(files, projectId) : save.route === "material-analysis" ? prepareAnalysis(files, projectId) : save.route === "trash-empty" ? prepareEmptyTrash(files) : save.route === "project-trash" ? prepareTrash(files, projectId) : save.route === "project-recovery" ? prepareRecovery(files, projectId) : save.route === "editor-snapshots" ? prepareSnapshot(files, projectId) :
+        const prepare = save.route === "execution-plan" ? prepareExecutionPlan(files, projectId) : save.route === "script-planning" ? preparePlanningTask(files, projectId) : save.route === "review-script" ? prepareScript(files, projectId) : save.route === "material-analysis" ? prepareAnalysis(files, projectId) : save.route === "trash-empty" ? prepareEmptyTrash(files) : save.route === "project-trash" ? prepareTrash(files, projectId) : save.route === "project-recovery" ? prepareRecovery(files, projectId) : save.route === "editor-snapshots" ? prepareSnapshot(files, projectId) :
           ["asset-imports", "result-registrations"].includes(save.route) ? prepareAsset(files, projectId) : null;
         if (!prepare) { commits.stopWrites(); break; }
         await commits.resume(save.saveId, prepare);

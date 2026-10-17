@@ -21,6 +21,7 @@ import type { Readable } from "node:stream";
 import { createAnalysisService } from "./analysis-service.ts";
 import { registerAnalysisRoutes } from "./analysis-routes.ts";
 import { registerScriptRoutes } from "./script-routes.ts";
+import { registerExecutionRoutes } from "./execution-routes.ts";
 import { createPlanningConfig } from "./planning-config.ts";
 import { createPlanningService } from "./planning-service.ts";
 import { registerPlanningRoutes } from "./planning-routes.ts";
@@ -193,6 +194,7 @@ export async function startHost(options: {
 
   registerAnalysisRoutes(app, analyses, { speech: whisper, detection: yolos, segmentation: silero }, pageFor, success, errorEnvelope);
   registerScriptRoutes(app, projects, pageFor, success, errorEnvelope);
+  registerExecutionRoutes(app, projects, pageFor, success, errorEnvelope);
   registerPlanningRoutes(app, planningConfig, planning, pageFor, success, errorEnvelope);
   app.get("/healthz", { schema: { querystring: emptyQuery, response: {
     200: object({ status: { const: "ready" }, protocolVersion: { const: 1 } }),

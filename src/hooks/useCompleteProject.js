@@ -5,6 +5,7 @@ import { trashSelection } from "../lib/projectTrash.js";
 import { useProjectMigration } from "./useProjectMigration.js";
 import { useMaterialAnalysis } from "./useMaterialAnalysis.js";
 import { useScriptReview } from "./useScriptReview.js";
+import { projectMediaUrl } from "../lib/projectSnapshot.js";
 
 const PROJECT_BINDING_KEY = "autocut.project-binding";
 
@@ -396,7 +397,25 @@ export function useCompleteProject({ hostSession, captureCompleteProject, prepar
   };
   const analysis = useMaterialAnalysis({ hostSession, isEditorBusy: () => latest.current.isEditorBusy?.(), getContext: getAnalysisContext });
   const scriptReview = useScriptReview({ hostSession, getContext: getAnalysisContext });
-  return hostSession ? { ...state, migration, analysis, scriptReview, storagePending: Boolean(pendingStorage.current), save, open, listStorage, changeStorage, projectId: binding.current?.project.projectId,
+  const execution = {
+    context: getAnalysisContext,
+    async request(path, body, key) {
+      const context = await getAnalysisContext();
+      return hostSession.request(`/api/v1/projects/${encodeURIComponent(context.projectId)}/${path}`,
+        body === undefined ? undefined : { ...body, editorSessionId: context.editorSessionId }, key, { signal: AbortSignal.timeout(300_000) });
+    },
+    async registerMedia(asset) {
+      await getAnalysisContext();
+      const current = binding.current;
+      if (!current?.queue) throw new Error("请先保存完整项目。");
+      const source = asset.projectMedia?.projectId === current.project.projectId && asset.projectMedia.bindings?.blob
+        ? projectMediaUrl(current.project.projectId, asset.projectMedia.bindings.blob) : asset.blob || asset.src;
+      const ref = await current.queue.registerMedia(source, asset.name, "execution-result", AbortSignal.timeout(300_000));
+      if (binding.current !== current) throw new Error("当前项目已切换。");
+      return ref;
+    },
+  };
+  return hostSession ? { ...state, migration, analysis, scriptReview, execution, storagePending: Boolean(pendingStorage.current), save, open, listStorage, changeStorage, projectId: binding.current?.project.projectId,
     newProject: () => resetProject(), closeProject: () => resetProject(true),
     busy: () => scriptReview.saving || analysis.running || analysis.unresolved || Boolean(analysis.pendingSave) || migration.inFlight || creating.current || Boolean(pendingStorage.current) || pendingCapture.current || Boolean(binding.current?.queue?.busy()) } : null;
 }

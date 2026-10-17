@@ -40,7 +40,7 @@ const operation = (type, properties, required) => ({
 // media, filesystem paths, URLs, reducer payloads, or arbitrary JavaScript.
 export const WEB_MCP_OPERATION_SCHEMA = {
   oneOf: [
-    operation("caption.add", { clipId: id, text: { type: "string", maxLength: 20000 }, start: time, end: time, audioClipId: id }, ["clipId", "text", "start", "end"]),
+    operation("caption.add", { clipId: id, text: { type: "string", maxLength: 20000 }, start: time, end: time, audioClipId: id, visualClipId: id }, ["clipId", "text", "start", "end"]),
     operation("caption.update", { clipId: id, text: { type: "string", maxLength: 20000 }, start: time, end: time }, ["clipId"]),
     operation("caption.delete", { clipId: id }, ["clipId"]),
     {
@@ -63,8 +63,9 @@ export const WEB_MCP_OPERATION_SCHEMA = {
     operation("project.set_fit", { fitMode: { type: "string", enum: ["contain", "cover"] } }, ["fitMode"]),
     {
       ...operation("clip.set_property", { clipId: id, property: { type: "string", enum: ["volume", "fadeIn", "fadeOut"] }, value: { type: "number", minimum: 0, maximum: 1800 } }, ["clipId", "property", "value"]),
-      allOf: [{ if: { properties: { property: { const: "volume" } } }, then: { properties: { value: { maximum: 4 } } } }],
+      allOf: [{ if: { properties: { property: { const: "volume" } } }, then: { properties: { value: { type: "number", maximum: 4 } } } }],
     },
+    operation("clip.set_speed", { clipId: id, speed: { type: "number", minimum: 0.25, maximum: 4 } }, ["clipId", "speed"]),
     operation("clip.set_muted", { clipId: id, muted }, ["clipId", "muted"]),
     operation("marker.add", marker, ["markerId", "time"]),
     operation("marker.update", marker, ["markerId"]),

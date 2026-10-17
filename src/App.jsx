@@ -1350,7 +1350,7 @@ export function App({ hostSession = null }) {
     timelineZoom, trackLocks, trackVisibility, visualSegments, visualOverlaySegments, volume,
   });
   const completeProject = useCompleteProject({ hostSession, captureCompleteProject, prepareCompleteProject, handleNewProject, notify,
-    isEditorBusy: () => isPlaying || isEditorBusy() || webMcp.isAiRunning() || generationPlugins.job.running });
+    isEditorBusy: () => isPlaying || isEditorBusy() || webMcp.isAiRunning() || webMcp.execution.busy || generationPlugins.job.running });
 
   const {
     activeTimelineClipDrag, audioClipPercent, displayedCaptionSegments,
@@ -1479,6 +1479,17 @@ export function App({ hostSession = null }) {
     sourceAudioBlob, musicBlob, audioBlob, rippleEditing, getProjectSnapshot,
     assets: userAssets, getRuntimeProject: getBrowserRuntimeProject,
     scriptReview: completeProject?.scriptReview,
+    completeProject,
+    bindExecutionAsset: (id, mediaRef, projectId) => setUserAssets(items => items.map(item => item.id === id ? {
+      ...item, assetId: mediaRef.entityId, projectMedia: { projectId, bindings: { blob: mediaRef } },
+    } : item)),
+    addExecutionAssets: items => {
+      const assets = items.map(item => {
+        const src = URL.createObjectURL(item.blob); imageUrlRefs.current.add(src);
+        return { ...item, src, previewSrc: src };
+      });
+      setUserAssets(current => [...assets, ...current]);
+    },
     currentTime, duration: exportContentDuration, historySignature,
     createArchive: createCurrentArchive, download: downloadBlob, notify,
     exportVideo: handleExportVideo, exportSettings, exportContentDuration, ratio, exporting,
@@ -1543,7 +1554,7 @@ export function App({ hostSession = null }) {
         }}
       />
       <Topbar
-        completeProject={completeProject}
+        completeProject={completeProject ? { ...completeProject, executionPlan: webMcp.execution } : null}
         hostService={hostSession ? <HostServicePanel client={hostSession} language={activeLanguage}
           isBusy={() => isEditorBusy() || webMcp.isAiRunning() || generationPlugins.job.running || completeProject?.busy()} /> : null}
         t={t}

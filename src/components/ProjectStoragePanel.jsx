@@ -3,6 +3,7 @@ import { formatStorageBytes } from "../lib/modelCacheInspection.js";
 import "./ProjectStoragePanel.css";
 import { MaterialAnalysisPanel } from "./MaterialAnalysisPanel.jsx";
 import { ScriptReviewPanel } from "./ScriptReviewPanel.jsx";
+import { ExecutionPlanPanel } from "./ExecutionPlanPanel.jsx";
 
 const reasons = {
   trash: "未清空", "current-save-point": "当前项目仍在使用", "previous-save-point": "上一保存点保留中",
@@ -84,6 +85,7 @@ export function ProjectStoragePanel({ project, onClose }) {
     </section>
     {showAnalysis ? <MaterialAnalysisPanel analysis={project.analysis} assets={assets.items.filter(item => analysisAssets.includes(item.assetId))} /> : null}
     {showScripts ? <ScriptReviewPanel review={project.scriptReview} analysis={project.analysis} assets={assets.items} onBusyChange={setScriptBusy} /> : null}
+    {project.executionPlan ? <ExecutionPlanPanel execution={project.executionPlan} saveStatus={project.status} onPreview={onClose} /> : null}
     <section aria-label="项目回收站">
       <div className="project-storage-heading"><h3>回收站</h3><button type="button" disabled={busy || project.storagePending || !selected.length}
         onClick={event => change(event, "empty", trash.items.filter(item => selected.includes(item.tombstoneId)))}>清空选中项（{selected.length}）</button></div>
