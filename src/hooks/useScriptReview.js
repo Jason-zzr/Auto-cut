@@ -17,6 +17,18 @@ export function useScriptReview({ hostSession, getContext }) {
     history: scriptId => request(`scripts/${encodeURIComponent(scriptId)}/history`),
     sources: () => request("script-sources"),
     provider: () => hostSession.request("/api/v1/planning-provider"),
+    async inspectAgent(taskId) {
+      if (taskId) return request(`agent-planning-runs/${encodeURIComponent(taskId)}/context`, {});
+      const [scripts, tasks, sources] = await Promise.all([request("scripts"), request("planning-runs"), request("script-sources")]);
+      return { scripts: scripts.items.map(record => ({ scriptId: record.scriptId, revision: record.revision,
+        title: record.draft.content.title, confirmed: Boolean(record.confirmed), sourcesCurrent: record.sourcesCurrent })),
+        sources: sources.items.map(({ sourceId, kind, capability, range, labels }) => ({ sourceId, kind, capability, range, labels })),
+        tasks: tasks.items.filter(task => task.provider.kind === "harness").map(task => ({ taskId: task.taskId,
+          status: task.status, scriptRef: task.scriptRef, source: task.provider })) };
+    },
+    prepareAgent: ({ requestId, source = { kind: "harness", harness: "unknown", providerId: "unknown", model: "unknown", authType: "unknown" }, maxInputBytes = 200000, ...input }) =>
+      request("agent-planning-runs", { ...input, source, maxInputBytes }, requestId),
+    submitAgent: ({ taskId, ...output }) => request(`agent-planning-runs/${encodeURIComponent(taskId)}/outputs`, output, output.inputDigest),
     saveProvider: (event, value) => {
       if (!event?.isTrusted) throw new Error("请从配置面板直接保存服务配置。");
       return hostSession.request("/api/v1/planning-provider", value);

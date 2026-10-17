@@ -12,8 +12,11 @@ export const scriptSource = z.strictObject({ sourceId: id, assetRef: analysisBas
   originalText: text, visualNotes: text, labels: z.array(id).max(100) });
 export const scriptGoals = z.strictObject({ theme: text, style: text,
   durationSeconds: z.number().positive().max(86400).nullable() });
-export const scriptProvider = z.strictObject({ providerId: id, revision, protocol: z.enum(["openai", "anthropic"]),
+export const scriptApiProvider = z.strictObject({ providerId: id, revision, protocol: z.enum(["openai", "anthropic"]),
   baseUrl: z.string().url().max(2048), model: id });
+export const scriptHarnessProvider = z.strictObject({ kind: z.literal("harness"), harness: id,
+  providerId: id, model: id, authType: id });
+export const scriptProvider = z.union([scriptApiProvider, scriptHarnessProvider]);
 export const scriptClassification = z.strictObject({ sourceId: id, themes: z.array(id).max(30),
   tags: z.array(id).max(100), included: z.boolean(), note: text });
 export const classificationRecord = z.strictObject({ schemaVersion: z.literal(1), format: z.literal("script-classification"),

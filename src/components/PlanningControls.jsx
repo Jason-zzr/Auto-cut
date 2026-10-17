@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 export function PlanningControls({ review, record, dirty, onGenerated }) {
   const [config, setConfig] = useState(null), [key, setKey] = useState(""), [configured, setConfigured] = useState(false);
   const [preview, setPreview] = useState(null), [runs, setRuns] = useState([]), [error, setError] = useState(""), [busy, setBusy] = useState(false);
+  const [source, setSource] = useState("agent"), [copied, setCopied] = useState(false);
   const latest = useRef({ review, onGenerated }); latest.current = { review, onGenerated };
   const generationKey = useRef(null), seen = useRef(new Set());
   useEffect(() => {
@@ -34,7 +35,15 @@ export function PlanningControls({ review, record, dirty, onGenerated }) {
   };
   const update = fields => { setConfig(value => ({ ...value, ...fields })); setPreview(null); };
   return <section aria-label="脚本生成服务">
-    <details><summary>生成服务配置</summary>
+    <label>生成方式<select disabled={busy} value={source} onChange={event => { setSource(event.target.value); setPreview(null); }}>
+      <option value="agent">当前 Agent</option><option value="api">直接 API</option>
+    </select></label>
+    {source === "agent" ? <div>
+      <button type="button" disabled={busy || dirty || !record} onClick={() => perform(async () => {
+        await navigator.clipboard.writeText(`请使用当前编辑器的脚本规划工具，为脚本 ${record.scriptId}（修订 ${record.revision}）生成或优化一份新草稿，保留来源并保存供审阅。`);
+        setCopied(true);
+      })}>{copied ? "已复制，粘贴到当前 Agent" : "复制脚本生成请求"}</button>
+    </div> : <><details><summary>生成服务配置</summary>
       {config ? <fieldset disabled={busy}>
         <label>来源名称<input value={config.providerId} onChange={event => update({ providerId: event.target.value })} /></label>
         <label>协议<select value={config.protocol} onChange={event => update({ protocol: event.target.value })}><option value="openai">OpenAI Chat Completions</option><option value="anthropic">Anthropic Messages</option></select></label>
@@ -50,7 +59,6 @@ export function PlanningControls({ review, record, dirty, onGenerated }) {
         })}>保存服务配置</button>
       </fieldset> : null}
     </details>
-    {error ? <p role="alert">{error}</p> : null}
     <button type="button" disabled={busy || dirty || !record || !configured} onClick={() => perform(async () => {
       setPreview(await review.preview(record)); generationKey.current = crypto.randomUUID();
     })}>审阅生成／优化的外发文本</button>
@@ -63,9 +71,10 @@ export function PlanningControls({ review, record, dirty, onGenerated }) {
         setRuns((await review.runs()).items);
       })}>确认发送并生成新草稿</button>
       <button type="button" disabled={busy} onClick={() => setPreview(null)}>取消</button>
-    </div> : null}
+    </div> : null}</>}
+    {error ? <p role="alert">{error}</p> : null}
     <ul>{runs.map(task => <li key={task.taskId}>
-      {task.provider.providerId} / {task.provider.model} · {({ prepared: "已准备", dispatched: "请求处理中", remote_unknown: "远端结果未知，未自动重发",
+      {task.provider.providerId} / {task.provider.model} · {task.provider.kind === "harness" && task.status === "prepared" ? "等待 Agent 输出" : ({ prepared: "已准备", dispatched: "请求处理中", remote_unknown: "远端结果未知，未自动重发",
         output_ready: "输出已保留，待登记", registered: "已登记新草稿", failed: "输出未通过验证" })[task.status]}
       {task.error ? <span> · {task.error}</span> : null}
       {task.status === "dispatched" ? <button type="button" disabled={busy} onClick={() => perform(async () => {

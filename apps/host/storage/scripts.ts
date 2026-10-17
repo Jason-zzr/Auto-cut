@@ -2,7 +2,7 @@ import { HostError } from "../sessions.ts";
 import type { ProjectFiles } from "./files.ts";
 import { assetRecord } from "./assets.ts";
 import { analysisRecord, rawAnalysisRecord } from "./analysis-records.ts";
-import { classificationRecord, scriptRecord, scriptWrite, scriptDigest, validScriptContent, type ScriptDraft } from "./script-records.ts";
+import { classificationRecord, scriptRecord, scriptWrite, scriptDigest, scriptSource, validScriptContent, type ScriptDraft, type ScriptSource } from "./script-records.ts";
 import { emptyRoots, encodeId, referenceKey, type Manifest, type ObjectReference, type Save } from "./records.ts";
 import { writeObject } from "./objects.ts";
 import { inspectMedia } from "./media.ts";
@@ -11,6 +11,36 @@ export async function readScriptObject(files: ProjectFiles, current: Manifest | 
   const object = current?.objects.find(item => referenceKey(item) === referenceKey(ref));
   if (!object) throw new HostError("REFERENCE_INVALID", 409, "The script source is not retained in this project.");
   return JSON.parse((await files.read(object.path)).toString("utf8"));
+}
+
+export async function listScriptSources(files: ProjectFiles, current: Manifest | null) {
+  const items: ScriptSource[] = [];
+  for (const ref of current?.roots.analyses ?? []) {
+    const parsed = analysisRecord.safeParse(await readScriptObject(files, current, ref));
+    if (!parsed.success) continue;
+    const analysis = parsed.data;
+    const raw = analysis.format === "material-analysis" ? analysis : rawAnalysisRecord.parse(await readScriptObject(files, current, analysis.rawRef));
+    if (!current?.roots.assets.some(ref => ref.entityId === raw.basis.assetRef.entityId && ref.revision === raw.basis.assetRef.revision)) continue;
+    const asset = assetRecord.parse(await readScriptObject(files, current, raw.basis.assetRef));
+    const ranges = analysis.format === "material-analysis-correction" && analysis.correction.intervals.length ?
+      analysis.correction.intervals : [{ range: raw.basis.range,
+        text: analysis.format === "material-analysis-correction" ? analysis.correction.text : raw.output.text,
+        labels: [], visualNotes: raw.output.samples.map(item => item.description || item.detections.map(value => value.label).join(", ")).join("\n") }];
+    for (const [index, range] of ranges.entries()) items.push(scriptSource.parse({ sourceId: `${analysis.analysisId}:${analysis.revision}:${index}`,
+      assetRef: raw.basis.assetRef, mediaRef: raw.basis.mediaRef, analysisRef: ref, range: range.range,
+      kind: asset.kind, capability: raw.basis.capability, originalText: range.text, visualNotes: range.visualNotes, labels: range.labels }));
+  }
+  for (const ref of current?.roots.assets ?? []) {
+    if (items.some(source => source.assetRef.entityId === ref.entityId)) continue;
+    const asset = assetRecord.parse(await readScriptObject(files, current, ref));
+    const media = current?.objects.find(object => referenceKey(object) === referenceKey(asset.mediaRef));
+    if (!media) throw new HostError("REFERENCE_INVALID", 409, "A registered source has no media object.");
+    const inspected = await inspectMedia(files, media.path, media.sizeBytes, true);
+    items.push(scriptSource.parse({ sourceId: `unanalysed:${asset.assetId}`, assetRef: ref, mediaRef: asset.mediaRef,
+      analysisRef: null, range: { sourceStartSeconds: 0, sourceEndSeconds: inspected.durationSeconds }, kind: asset.kind,
+      capability: "unanalysed", originalText: "", visualNotes: "", labels: [] }));
+  }
+  return items;
 }
 
 export async function validateScriptSources(files: ProjectFiles, current: Manifest | null, draft: ScriptDraft, latest = false) {

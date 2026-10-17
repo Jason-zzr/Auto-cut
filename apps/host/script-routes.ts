@@ -3,12 +3,8 @@ import { z } from "zod";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { HostError, type PageSession } from "./sessions.ts";
 import type { createProjects } from "./storage/projects.ts";
-import { listScripts, prepareScript, readScriptObject, validateScriptSources } from "./storage/scripts.ts";
-import { scriptRecord, scriptWrite, scriptSource, type ScriptSource } from "./storage/script-records.ts";
-import { analysisRecord, rawAnalysisRecord } from "./storage/analysis-records.ts";
-import { assetRecord } from "./storage/assets.ts";
-import { inspectMedia } from "./storage/media.ts";
-import { referenceKey } from "./storage/records.ts";
+import { listScripts, listScriptSources, prepareScript, readScriptObject, validateScriptSources } from "./storage/scripts.ts";
+import { scriptRecord, scriptWrite, scriptSource } from "./storage/script-records.ts";
 
 export function registerScriptRoutes(app: FastifyInstance, projects: ReturnType<typeof createProjects>,
   pageFor: (request: FastifyRequest) => PageSession, success: (request: FastifyRequest, data: unknown) => unknown,
@@ -40,33 +36,7 @@ export function registerScriptRoutes(app: FastifyInstance, projects: ReturnType<
     schema: { params: json(params), querystring: json(empty), response: responses(z.strictObject({ items: z.array(scriptSource) })) },
   }, async request => {
     const project = projects.get(pageFor(request), request.params.projectId), current = project.commits.current();
-    const items: ScriptSource[] = [];
-    for (const ref of current?.roots.analyses ?? []) {
-      const parsed = analysisRecord.safeParse(await readScriptObject(project.files, current, ref));
-      if (!parsed.success) continue;
-      const analysis = parsed.data;
-      const raw = analysis.format === "material-analysis" ? analysis : rawAnalysisRecord.parse(await readScriptObject(project.files, current, analysis.rawRef));
-      if (!current?.roots.assets.some(ref => ref.entityId === raw.basis.assetRef.entityId && ref.revision === raw.basis.assetRef.revision)) continue;
-      const asset = assetRecord.parse(await readScriptObject(project.files, current, raw.basis.assetRef));
-      const ranges = analysis.format === "material-analysis-correction" && analysis.correction.intervals.length ?
-        analysis.correction.intervals : [{ range: raw.basis.range,
-          text: analysis.format === "material-analysis-correction" ? analysis.correction.text : raw.output.text,
-          labels: [], visualNotes: raw.output.samples.map(item => item.description || item.detections.map(value => value.label).join(", ")).join("\n") }];
-      for (const [index, range] of ranges.entries()) items.push(scriptSource.parse({ sourceId: `${analysis.analysisId}:${analysis.revision}:${index}`,
-        assetRef: raw.basis.assetRef, mediaRef: raw.basis.mediaRef, analysisRef: ref, range: range.range,
-        kind: asset.kind, capability: raw.basis.capability, originalText: range.text, visualNotes: range.visualNotes, labels: range.labels }));
-    }
-    for (const ref of current?.roots.assets ?? []) {
-      if (items.some(source => source.assetRef.entityId === ref.entityId)) continue;
-      const asset = assetRecord.parse(await readScriptObject(project.files, current, ref));
-      const media = current?.objects.find(object => referenceKey(object) === referenceKey(asset.mediaRef));
-      if (!media) throw new HostError("REFERENCE_INVALID", 409, "A registered source has no media object.");
-      const inspected = await inspectMedia(project.files, media.path, media.sizeBytes, true);
-      items.push(scriptSource.parse({ sourceId: `unanalysed:${asset.assetId}`, assetRef: ref, mediaRef: asset.mediaRef,
-        analysisRef: null, range: { sourceStartSeconds: 0, sourceEndSeconds: inspected.durationSeconds }, kind: asset.kind,
-        capability: "unanalysed", originalText: "", visualNotes: "", labels: [] }));
-    }
-    return success(request, { items });
+    return success(request, { items: await listScriptSources(project.files, current) });
   });
   const scriptParams = params.extend({ scriptId: id });
   app.get<{ Params: { projectId: string; scriptId: string } }>("/api/v1/projects/:projectId/scripts/:scriptId/history", {

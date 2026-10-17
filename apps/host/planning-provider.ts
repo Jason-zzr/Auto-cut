@@ -1,10 +1,13 @@
 import { z } from "zod";
 import { HostError } from "./sessions.ts";
-import { scriptContent, scriptProvider } from "./storage/script-records.ts";
+import { scriptContent, scriptApiProvider, scriptHarnessProvider } from "./storage/script-records.ts";
 
-export const planningProviderConfig = scriptProvider.extend({ maxOutputTokens: z.number().int().min(256).max(64000),
+export const planningProviderConfig = scriptApiProvider.extend({ maxOutputTokens: z.number().int().min(256).max(64000),
   maxInputBytes: z.number().int().min(4096).max(2_000_000), timeoutSeconds: z.number().int().min(10).max(600) });
 export type PlanningProviderConfig = z.infer<typeof planningProviderConfig>;
+export const planningHarnessConfig = scriptHarnessProvider.extend({
+  maxInputBytes: planningProviderConfig.shape.maxInputBytes, timeoutSeconds: planningProviderConfig.shape.timeoutSeconds });
+export const planningExecutionConfig = z.union([planningProviderConfig, planningHarnessConfig]);
 
 export function planningEndpoint(config: PlanningProviderConfig) {
   const url = new URL(config.baseUrl);

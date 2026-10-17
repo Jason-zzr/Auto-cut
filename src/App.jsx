@@ -1478,6 +1478,7 @@ export function App({ hostSession = null }) {
     language: activeLanguage, visualSegments, visualOverlaySegments, audioSegments, musicSegments,
     sourceAudioBlob, musicBlob, audioBlob, rippleEditing, getProjectSnapshot,
     assets: userAssets, getRuntimeProject: getBrowserRuntimeProject,
+    scriptReview: completeProject?.scriptReview,
     currentTime, duration: exportContentDuration, historySignature,
     createArchive: createCurrentArchive, download: downloadBlob, notify,
     exportVideo: handleExportVideo, exportSettings, exportContentDuration, ratio, exporting,
