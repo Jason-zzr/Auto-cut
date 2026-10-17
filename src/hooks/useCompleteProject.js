@@ -4,6 +4,7 @@ import { waitForHostMediaController } from "../lib/serviceWorker.js";
 import { trashSelection } from "../lib/projectTrash.js";
 import { useProjectMigration } from "./useProjectMigration.js";
 import { useMaterialAnalysis } from "./useMaterialAnalysis.js";
+import { useScriptReview } from "./useScriptReview.js";
 
 const PROJECT_BINDING_KEY = "autocut.project-binding";
 
@@ -386,14 +387,16 @@ export function useCompleteProject({ hostSession, captureCompleteProject, prepar
     if (binding.current !== current || !project.currentSavePointId || project.blocked || (requireSaved && project.pending)) throw new Error("项目状态已变化，请保存后重试。");
     return { projectId: project.projectId, editorSessionId: current.lease.editorSessionId, savePointId: project.currentSavePointId };
   } });
-  const analysis = useMaterialAnalysis({ hostSession, isEditorBusy: () => latest.current.isEditorBusy?.(), getContext: async () => {
+  const getAnalysisContext = async () => {
     const current = binding.current;
     if (!current || creating.current) throw new Error("请先打开或保存完整项目，再分析素材。");
     if (!current.lease || Date.parse(current.lease.expiresAt) <= Date.now()) await acquire(current);
     if (binding.current !== current) throw new Error("当前项目已切换。");
     return { projectId: current.project.projectId, editorSessionId: current.lease.editorSessionId };
-  } });
-  return hostSession ? { ...state, migration, analysis, storagePending: Boolean(pendingStorage.current), save, open, listStorage, changeStorage, projectId: binding.current?.project.projectId,
+  };
+  const analysis = useMaterialAnalysis({ hostSession, isEditorBusy: () => latest.current.isEditorBusy?.(), getContext: getAnalysisContext });
+  const scriptReview = useScriptReview({ hostSession, getContext: getAnalysisContext });
+  return hostSession ? { ...state, migration, analysis, scriptReview, storagePending: Boolean(pendingStorage.current), save, open, listStorage, changeStorage, projectId: binding.current?.project.projectId,
     newProject: () => resetProject(), closeProject: () => resetProject(true),
-    busy: () => analysis.running || analysis.unresolved || Boolean(analysis.pendingSave) || migration.inFlight || creating.current || Boolean(pendingStorage.current) || pendingCapture.current || Boolean(binding.current?.queue?.busy()) } : null;
+    busy: () => scriptReview.saving || analysis.running || analysis.unresolved || Boolean(analysis.pendingSave) || migration.inFlight || creating.current || Boolean(pendingStorage.current) || pendingCapture.current || Boolean(binding.current?.queue?.busy()) } : null;
 }

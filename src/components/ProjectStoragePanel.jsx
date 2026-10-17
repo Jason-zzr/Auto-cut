@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { formatStorageBytes } from "../lib/modelCacheInspection.js";
 import "./ProjectStoragePanel.css";
 import { MaterialAnalysisPanel } from "./MaterialAnalysisPanel.jsx";
+import { ScriptReviewPanel } from "./ScriptReviewPanel.jsx";
 
 const reasons = {
   trash: "未清空", "current-save-point": "当前项目仍在使用", "previous-save-point": "上一保存点保留中",
@@ -18,9 +19,11 @@ export function ProjectStoragePanel({ project, onClose }) {
   const [selected, setSelected] = useState([]);
   const [analysisAssets, setAnalysisAssets] = useState([]);
   const [showAnalysis, setShowAnalysis] = useState(false);
+  const [showScripts, setShowScripts] = useState(false);
+  const [scriptBusy, setScriptBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const busy = loading || project.storageBusy;
+  const busy = loading || project.storageBusy || scriptBusy;
   const refresh = async () => {
     setLoading(true); setError("");
     try {
@@ -60,6 +63,7 @@ export function ProjectStoragePanel({ project, onClose }) {
     </div>
     <div className="project-storage-toolbar">
       <span>{project.name}</span><button type="button" disabled={busy} onClick={refresh}>刷新列表</button>
+      <button type="button" disabled={busy} onClick={() => setShowScripts(true)}>脚本审阅</button>
       {project.storagePending ? <button type="button" disabled={busy} onClick={event => change(event, "retry")}>重试上次操作</button> : null}
     </div>
     {error || project.storageError ? <p role="alert">{error || project.storageError}</p> : null}
@@ -79,6 +83,7 @@ export function ProjectStoragePanel({ project, onClose }) {
       {assets.cursor ? <button type="button" disabled={busy} onClick={() => loadMore("assets")}>加载更多素材</button> : null}
     </section>
     {showAnalysis ? <MaterialAnalysisPanel analysis={project.analysis} assets={assets.items.filter(item => analysisAssets.includes(item.assetId))} /> : null}
+    {showScripts ? <ScriptReviewPanel review={project.scriptReview} analysis={project.analysis} assets={assets.items} onBusyChange={setScriptBusy} /> : null}
     <section aria-label="项目回收站">
       <div className="project-storage-heading"><h3>回收站</h3><button type="button" disabled={busy || project.storagePending || !selected.length}
         onClick={event => change(event, "empty", trash.items.filter(item => selected.includes(item.tombstoneId)))}>清空选中项（{selected.length}）</button></div>

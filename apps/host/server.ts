@@ -20,6 +20,10 @@ import { mediaRange } from "./storage/media.ts";
 import type { Readable } from "node:stream";
 import { createAnalysisService } from "./analysis-service.ts";
 import { registerAnalysisRoutes } from "./analysis-routes.ts";
+import { registerScriptRoutes } from "./script-routes.ts";
+import { createPlanningConfig } from "./planning-config.ts";
+import { createPlanningService } from "./planning-service.ts";
+import { registerPlanningRoutes } from "./planning-routes.ts";
 import { createAnalysisResources } from "./whisper-resources.ts";
 import { analysisTaskRecord } from "./storage/analysis-records.ts";
 
@@ -83,6 +87,8 @@ export async function startHost(options: {
   const yolos = createAnalysisResources(options.machineDirectory, "yolos-tiny-q8");
   const silero = createAnalysisResources(options.machineDirectory, "silero-vad");
   const analyses = createAnalysisService(projects, { speech: whisper, detection: yolos, segmentation: silero });
+  const planningConfig = createPlanningConfig(options.machineDirectory, options.storageExecutable ?? join(dirname(options.dist), "autocut-storage"));
+  const planning = createPlanningService(projects, planningConfig);
   const selections = createFileSelections();
   const imports = options.machineDirectory ? await createMigrationImports(options.machineDirectory, options.storageExecutable ?? join(dirname(options.dist), "autocut-storage")) : null;
   app.addContentTypeParser("application/octet-stream", (_request, payload, done) => done(null, payload));
@@ -116,6 +122,7 @@ export async function startHost(options: {
       await app.close();
       await imports?.close();
       await analyses.close();
+      await planning.close();
       await whisper.close();
       await yolos.close();
       await silero.close();
@@ -185,6 +192,8 @@ export async function startHost(options: {
   });
 
   registerAnalysisRoutes(app, analyses, { speech: whisper, detection: yolos, segmentation: silero }, pageFor, success, errorEnvelope);
+  registerScriptRoutes(app, projects, pageFor, success, errorEnvelope);
+  registerPlanningRoutes(app, planningConfig, planning, pageFor, success, errorEnvelope);
   app.get("/healthz", { schema: { querystring: emptyQuery, response: {
     200: object({ status: { const: "ready" }, protocolVersion: { const: 1 } }),
     503: object({ status: { const: "not_ready" }, protocolVersion: { const: 1 } }),
@@ -517,7 +526,7 @@ export async function startHost(options: {
   }, async (request) => {
     const key = request.headers["idempotency-key"];
     if (typeof key !== "string" || !key.length || key.length > 128) throw new HostError("INVALID_ARGUMENT", 400, "Idempotency-Key is required.");
-    if (projects.busy() || selections.busy() || imports?.busy()) throw new HostError("TASKS_DRAINING", 409, "Wait for project operations to finish before stopping.");
+    if (projects.busy() || planning.busy() || selections.busy() || imports?.busy()) throw new HostError("TASKS_DRAINING", 409, "Wait for project operations to finish before stopping.");
     return success(request, lifecycle.exit(pageFor(request), request.body, key));
   });
 
