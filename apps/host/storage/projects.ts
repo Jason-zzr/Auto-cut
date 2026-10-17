@@ -13,6 +13,7 @@ import { prepareTrash, trashRequest, emptyTrashSelection, emptyTrashDigest, prep
   type EmptyTrashSelection, type TrashRequest } from "./trash.ts";
 import { collectProjectGarbage, inspectRetention } from "./retention.ts";
 import { createMigrationExports } from "./migration-exports.ts";
+import { prepareAnalysis } from "./analyses.ts";
 import packageMetadata from "../../../package.json" with { type: "json" };
 
 type Project = { projectId: string; name: string; files: Awaited<ReturnType<typeof openProjectFiles>>;
@@ -46,7 +47,7 @@ export function createProjects(instanceId: string, executable: string) {
         idempotencyKey: recovery.key, request: recovery.choice, editorSnapshotId: null, editorSequence: null }, prepareRecovery(files, projectId)) : null;
       for (const save of commits.pending()) {
         if (!["queued", "writing"].includes(commits.get(save.saveId).status)) continue;
-        const prepare = save.route === "trash-empty" ? prepareEmptyTrash(files) : save.route === "project-trash" ? prepareTrash(files, projectId) : save.route === "project-recovery" ? prepareRecovery(files, projectId) : save.route === "editor-snapshots" ? prepareSnapshot(files, projectId) :
+        const prepare = save.route === "material-analysis" ? prepareAnalysis(files, projectId) : save.route === "trash-empty" ? prepareEmptyTrash(files) : save.route === "project-trash" ? prepareTrash(files, projectId) : save.route === "project-recovery" ? prepareRecovery(files, projectId) : save.route === "editor-snapshots" ? prepareSnapshot(files, projectId) :
           ["asset-imports", "result-registrations"].includes(save.route) ? prepareAsset(files, projectId) : null;
         if (!prepare) { commits.stopWrites(); break; }
         await commits.resume(save.saveId, prepare);
@@ -424,6 +425,7 @@ export function createProjects(instanceId: string, executable: string) {
       return result;
     },
     get,
+    opened(page: PageSession) { return [...projects.values()].filter(project => project.pages.has(page.pageSessionId)); },
     editors,
     busy() { return pendingOperations > 0 || importing.size > 0 || [...projects.values()].some(project => project.exports.busy() || project.commits.state().pending > 0 || project.commits.state().blocked); },
     async close() {

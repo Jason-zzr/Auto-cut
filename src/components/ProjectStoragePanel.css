@@ -11,3 +11,11 @@
 .project-storage-dialog button:disabled { opacity: .5; cursor: default; }
 .project-storage-dialog button:focus-visible, .project-storage-dialog input:focus-visible { outline: 2px solid #52dcca; outline-offset: 3px; }
 .project-storage-dialog [role="alert"] { color: #ffb8ae; }
+.material-analysis fieldset { display: flex; flex-wrap: wrap; gap: 12px; margin: 12px 0; border: 1px solid #586575; }
+.material-analysis label { display: flex; align-items: center; gap: 6px; }
+.material-analysis input[type="number"] { width: 110px; }
+.material-analysis textarea { width: 100%; min-height: 80px; }
+.analysis-source { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 0; }
+.analysis-preview video, .analysis-preview img { max-width: 100%; max-height: 320px; margin-top: 12px; }
+.analysis-correction label { display: block; width: 100%; }
+.analysis-correction pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 300px; overflow: auto; }

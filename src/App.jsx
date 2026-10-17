@@ -1350,7 +1350,7 @@ export function App({ hostSession = null }) {
     timelineZoom, trackLocks, trackVisibility, visualSegments, visualOverlaySegments, volume,
   });
   const completeProject = useCompleteProject({ hostSession, captureCompleteProject, prepareCompleteProject, handleNewProject, notify,
-    isEditorBusy: () => isEditorBusy() || webMcp.isAiRunning() || generationPlugins.job.running });
+    isEditorBusy: () => isPlaying || isEditorBusy() || webMcp.isAiRunning() || generationPlugins.job.running });
 
   const {
     activeTimelineClipDrag, audioClipPercent, displayedCaptionSegments,

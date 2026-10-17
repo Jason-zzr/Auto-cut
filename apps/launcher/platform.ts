@@ -16,6 +16,7 @@ export async function selectLocalPaths(kind: "file" | "directory", multiple: boo
       const options = { withPrompt: "选择 Auto-cut 项目或素材", multipleSelectionsAllowed: args[1] === "true" };
       const kinds = JSON.parse(args[2]);
       if (args[0] === "file" && kinds.length) options.ofType = kinds;
+      app.activate();
       const result = args[0] === "directory" ? app.chooseFolder(options) : app.chooseFile(options);
       const paths = Array.isArray(result) ? result : [result];
       return JSON.stringify({ paths: paths.map(function(path) { return path.toString(); }) });

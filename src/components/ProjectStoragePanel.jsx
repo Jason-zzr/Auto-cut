@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { formatStorageBytes } from "../lib/modelCacheInspection.js";
 import "./ProjectStoragePanel.css";
+import { MaterialAnalysisPanel } from "./MaterialAnalysisPanel.jsx";
 
 const reasons = {
   trash: "未清空", "current-save-point": "当前项目仍在使用", "previous-save-point": "上一保存点保留中",
@@ -15,6 +16,8 @@ export function ProjectStoragePanel({ project, onClose }) {
   const [assets, setAssets] = useState({ items: [], cursor: null });
   const [trash, setTrash] = useState({ items: [], cursor: null });
   const [selected, setSelected] = useState([]);
+  const [analysisAssets, setAnalysisAssets] = useState([]);
+  const [showAnalysis, setShowAnalysis] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const busy = loading || project.storageBusy;
@@ -63,14 +66,19 @@ export function ProjectStoragePanel({ project, onClose }) {
     {busy ? <p role="status">正在处理项目素材…</p> : null}
     <section aria-label="项目素材">
       <h3>项目素材</h3>
+      <button type="button" disabled={busy} onClick={() => setAnalysisAssets(assets.items.map(item => item.assetId))}>选择当前列表全部素材</button>
+      <button type="button" disabled={busy || !analysisAssets.length} onClick={() => setShowAnalysis(true)}>分析选中素材（{analysisAssets.length}）</button>
       {!assets.items.length && !loading ? <p>暂无已保存素材</p> : null}
       <ul>{assets.items.map(item => <li key={item.assetId}>
+        <input type="checkbox" aria-label={`选择分析：${item.name}`} checked={analysisAssets.includes(item.assetId)} disabled={busy || project.analysis.running}
+          onChange={event => setAnalysisAssets(values => event.target.checked ? [...values, item.assetId] : values.filter(id => id !== item.assetId))} />
         <div><strong>{item.name}</strong><small>{formatStorageBytes(item.sizeBytes)}</small></div>
         <button type="button" disabled={busy || project.storagePending} aria-label={`移入回收站：${item.name}`}
           onClick={event => change(event, "delete", [item])}>移入回收站</button>
       </li>)}</ul>
       {assets.cursor ? <button type="button" disabled={busy} onClick={() => loadMore("assets")}>加载更多素材</button> : null}
     </section>
+    {showAnalysis ? <MaterialAnalysisPanel analysis={project.analysis} assets={assets.items.filter(item => analysisAssets.includes(item.assetId))} /> : null}
     <section aria-label="项目回收站">
       <div className="project-storage-heading"><h3>回收站</h3><button type="button" disabled={busy || project.storagePending || !selected.length}
         onClick={event => change(event, "empty", trash.items.filter(item => selected.includes(item.tombstoneId)))}>清空选中项（{selected.length}）</button></div>

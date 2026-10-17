@@ -3,6 +3,7 @@ import { createProjectSaveQueue } from "../lib/projectSaveQueue.js";
 import { waitForHostMediaController } from "../lib/serviceWorker.js";
 import { trashSelection } from "../lib/projectTrash.js";
 import { useProjectMigration } from "./useProjectMigration.js";
+import { useMaterialAnalysis } from "./useMaterialAnalysis.js";
 
 const PROJECT_BINDING_KEY = "autocut.project-binding";
 
@@ -103,7 +104,7 @@ export function useCompleteProject({ hostSession, captureCompleteProject, prepar
   const open = async (resumeProjectId = null) => {
     if (!hostSession || creating.current) return;
     const previous = binding.current;
-    if (migration.inFlight || pendingStorage.current || pendingCapture.current || previous?.queue?.busy() || latest.current.isEditorBusy?.()) {
+    if (analysis.running || analysis.unresolved || analysis.pendingSave || migration.inFlight || pendingStorage.current || pendingCapture.current || previous?.queue?.busy() || latest.current.isEditorBusy?.()) {
       latest.current.notify("请等待当前编辑和保存完成后再打开项目。"); return;
     }
     if (!resumeProjectId && !window.confirm("打开完整项目将替换当前时间线，是否继续？")) return;
@@ -148,7 +149,6 @@ export function useCompleteProject({ hostSession, captureCompleteProject, prepar
             await new Promise(resolve => setTimeout(resolve, 500));
           }
           project = await hostSession.request(`/api/v1/projects/${encodeURIComponent(receipt.projectId)}`);
-          if (!project.editorSnapshot) throw new Error("回退已完成，但该保存点不含可打开的编辑快照。", { cause: error });
         }
       }
       ensureOperation(version);
@@ -156,9 +156,8 @@ export function useCompleteProject({ hostSession, captureCompleteProject, prepar
       await acquire(candidate);
       await waitForHostMediaController();
       const data = await hostSession.request(`/api/v1/projects/${encodeURIComponent(project.projectId)}`);
-      if (!data.editorSnapshot) throw new Error("此项目还没有已保存的完整编辑快照。");
       candidate.project = data;
-      const prepared = await latest.current.prepareCompleteProject(data.editorSnapshot, project.projectId);
+      const prepared = data.editorSnapshot ? await latest.current.prepareCompleteProject(data.editorSnapshot, project.projectId) : null;
       ensureOperation(version);
       if (signature(latest.current.captureCompleteProject()) !== originalSignature || latest.current.isEditorBusy?.()) {
         throw new Error("打开期间当前内容发生变化，已保留当前时间线。请保存后重新打开。");
@@ -170,13 +169,14 @@ export function useCompleteProject({ hostSession, captureCompleteProject, prepar
         previous.lease = null;
       }
       ensureOperation(version);
-      const restoredSignature = signature(prepared.captured);
+      const restoredSignature = prepared ? signature(prepared.captured) : null;
       installQueue(candidate);
       previous?.unsubscribe?.(); previous?.queue?.close();
       clearTimeout(captureTimer.current); pendingCapture.current = false;
       binding.current = candidate;
       lastSignature.current = restoredSignature; observedSignature.current = restoredSignature;
-      prepared.apply();
+      if (prepared) prepared.apply();
+      else latest.current.handleNewProject({ confirmed: true, complete: true });
       remember(candidate);
       setState({ ...candidate.queue.getSnapshot(), status: "opened", name: project.name });
       latest.current.notify("完整项目已打开。");
@@ -195,7 +195,7 @@ export function useCompleteProject({ hostSession, captureCompleteProject, prepar
     if (creating.current) return;
     const current = binding.current;
     if (closeCurrent && !current) return;
-    if (migration.inFlight || pendingStorage.current || pendingCapture.current || current?.queue?.busy() || latest.current.isEditorBusy?.()) {
+    if (analysis.running || analysis.unresolved || analysis.pendingSave || migration.inFlight || pendingStorage.current || pendingCapture.current || current?.queue?.busy() || latest.current.isEditorBusy?.()) {
       latest.current.notify(closeCurrent ? "请等待当前编辑和保存完成后再关闭项目。" : "请等待当前编辑和保存完成后再新建项目。"); return;
     }
     if (!window.confirm(closeCurrent ? "关闭当前完整项目？已保存的项目文件会保留，当前时间线将清空。" : "新建项目将清空当前时间线，是否继续？")) return;
@@ -386,7 +386,14 @@ export function useCompleteProject({ hostSession, captureCompleteProject, prepar
     if (binding.current !== current || !project.currentSavePointId || project.blocked || (requireSaved && project.pending)) throw new Error("项目状态已变化，请保存后重试。");
     return { projectId: project.projectId, editorSessionId: current.lease.editorSessionId, savePointId: project.currentSavePointId };
   } });
-  return hostSession ? { ...state, migration, storagePending: Boolean(pendingStorage.current), save, open, listStorage, changeStorage, projectId: binding.current?.project.projectId,
+  const analysis = useMaterialAnalysis({ hostSession, isEditorBusy: () => latest.current.isEditorBusy?.(), getContext: async () => {
+    const current = binding.current;
+    if (!current || creating.current) throw new Error("请先打开或保存完整项目，再分析素材。");
+    if (!current.lease || Date.parse(current.lease.expiresAt) <= Date.now()) await acquire(current);
+    if (binding.current !== current) throw new Error("当前项目已切换。");
+    return { projectId: current.project.projectId, editorSessionId: current.lease.editorSessionId };
+  } });
+  return hostSession ? { ...state, migration, analysis, storagePending: Boolean(pendingStorage.current), save, open, listStorage, changeStorage, projectId: binding.current?.project.projectId,
     newProject: () => resetProject(), closeProject: () => resetProject(true),
-    busy: () => migration.inFlight || creating.current || Boolean(pendingStorage.current) || pendingCapture.current || Boolean(binding.current?.queue?.busy()) } : null;
+    busy: () => analysis.running || analysis.unresolved || Boolean(analysis.pendingSave) || migration.inFlight || creating.current || Boolean(pendingStorage.current) || pendingCapture.current || Boolean(binding.current?.queue?.busy()) } : null;
 }

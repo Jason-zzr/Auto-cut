@@ -4,6 +4,7 @@ import type { ProjectFiles } from "./files.ts";
 import { assetRecord } from "./assets.ts";
 import { snapshotRecord, validateSnapshot } from "./snapshots.ts";
 import { tombstoneRecord } from "./trash.ts";
+import { analysisReferences, verifyAnalysisObject } from "./analysis-closure.ts";
 import { encodeId, referenceKey, sha256, type Manifest, type ObjectRecord, type ObjectReference } from "./records.ts";
 
 const resultRecord = z.strictObject({ schemaVersion: z.literal(1), projectId: z.string(), resultId: z.string(), revision: z.literal(1),
@@ -35,6 +36,8 @@ export async function verifyProjectClosure(files: ProjectFiles, manifest: Manife
   const tasks = new Map<string, z.infer<typeof taskRecord>>();
   const deletedAssets = new Set<string>();
   for (const object of manifest.objects) {
+    if (["analysis", "task", "result"].includes(object.kind) &&
+        await verifyAnalysisObject(object, await read(object), manifest, read)) continue;
     if (object.kind === "media") {
       const prefix = object.blobId ? `media/${encodeId(object.entityId)}/${encodeId(object.blobId)}.` : "";
       if (!object.blobId || object.revision !== undefined || !object.sizeBytes ||
@@ -125,13 +128,16 @@ export async function retainProjectClosure(files: ProjectFiles, manifest: Manife
       pending.push(asset);
       continue;
     }
-    if (!["asset", "editor-snapshot", "trash", "result", "task"].includes(object.kind)) {
+    if (!["asset", "analysis", "editor-snapshot", "trash", "result", "task"].includes(object.kind)) {
       pending.push(...manifest.objects);
       continue;
     }
     const bytes = await files.read(object.path);
     if (bytes.length !== object.sizeBytes || sha256(bytes) !== object.sha256) throw new HostError("PROJECT_INVALID", 409, "Project metadata is damaged.");
     const value = JSON.parse(bytes.toString("utf8"));
+    const analysisRefs = analysisReferences(object, value);
+    if (analysisRefs) { pending.push(...analysisRefs); continue; }
+    if (object.kind === "analysis") { pending.push(...manifest.objects); continue; }
     if (object.kind === "asset") pending.push(assetRecord.parse(value).mediaRef);
     else if (object.kind === "editor-snapshot") pending.push(...snapshotRecord.parse(value).refs);
     else if (object.kind === "trash") {
