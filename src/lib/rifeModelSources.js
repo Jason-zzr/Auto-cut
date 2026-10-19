@@ -1,4 +1,4 @@
-import { mirroredModelFileUrls } from "./modelSources";
+import { mirroredModelFileUrls } from "./modelSources.js";
 
 export const RIFE_HUGGING_FACE_REVISION = "64f590200ea7d6142a5e58cbf069025e44c84dbe";
 export const RIFE_MODELSCOPE_REVISION = "7e4d08c6147638872679c6d2c2af71424599fd58";

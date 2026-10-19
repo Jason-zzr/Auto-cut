@@ -1,4 +1,4 @@
-import { getModelSourcePreference } from "./modelSources";
+import { getModelSourcePreference } from "./modelSources.js";
 
 // Practical-RIFE 4.17-lite: motion interpolation of depth, not crossfading.
 // Keep only the current source pair in the worker; cancellation releases its GPU.
