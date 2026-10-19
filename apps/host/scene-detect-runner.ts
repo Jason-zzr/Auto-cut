@@ -107,6 +107,7 @@ export function createSceneDetectRunner(openMontageRoot: string | undefined, pyt
       if (!within(request.outputDir, request.outputPath) || !isAbsolute(request.inputPath)) {
         throw new HostError("PATH_OUTSIDE_PROJECT", 400, "SceneDetect input or output path is outside its assigned boundary.");
       }
+      if (request.signal.aborted) throw new HostError("TASK_CANCELLED", 409, "SceneDetect was cancelled.");
       const child = spawn(pythonExecutable!, ["-u", "-c", adapterSource], {
         cwd: root,
         shell: false,
@@ -133,7 +134,7 @@ export function createSceneDetectRunner(openMontageRoot: string | undefined, pyt
         settled = true; rejectResult(error);
       };
       const stop = () => { if (!child.killed) child.kill("SIGTERM"); };
-      const abort = () => stop();
+      const abort = () => { fail(new HostError("TASK_CANCELLED", 409, "SceneDetect was cancelled.")); stop(); };
       request.signal.addEventListener("abort", abort, { once: true });
       const timeout = setTimeout(() => fail(new HostError("TOOL_TIMEOUT", 504, "SceneDetect exceeded its execution deadline.")),
         Math.max(0, request.deadline - Date.now()));

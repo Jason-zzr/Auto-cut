@@ -1359,7 +1359,7 @@ export function App({ hostSession = null }) {
     timelineZoom, trackLocks, trackVisibility, visualSegments, visualOverlaySegments, volume,
   });
   const completeProject = useCompleteProject({ hostSession, captureCompleteProject, prepareCompleteProject, handleNewProject, notify,
-    isEditorBusy: () => isPlaying || isEditorBusy() || webMcp.isAiRunning() || webMcp.execution.busy });
+    isEditorBusy: () => isPlaying || Boolean(getEditorBusyReason(false)) || webMcp.isAiRunning() || webMcp.execution.busy });
 
   const {
     activeTimelineClipDrag, audioClipPercent, displayedCaptionSegments,
@@ -1556,7 +1556,7 @@ export function App({ hostSession = null }) {
     getSnapshot: getProjectSnapshot, getRuntime: getBrowserRuntimeProject,
     applyReview: applyBrowserReview, rippleEditing, setRippleEditing, seekTo, t,
   });
-  const getEditorBusyReason = () => {
+  const getEditorBusyReason = (includeMaterialAnalysis = true) => {
     if (projectImportProgress) return "正在导入项目";
     if (exporting) return "正在导出媒体";
     if (timelineClipDragRef.current || pointerAssetDragRef.current || isDragging || draggedAssetId) return "正在编辑或拖动素材";
@@ -1565,7 +1565,7 @@ export function App({ hostSession = null }) {
     if (visionJob.running || avatarJob.running || autoEdit.job.running || faceSwap.job.running || cinematicDepth.job.running ||
       photoParallaxDepth.job.running || miganRepair.job.running || hdRestoration.job.running || smartDenoise.job.running || silenceRemoval.job.running) return "正在处理画面或分析时间线";
     if (generationPlugins.isRunning()) return "生成插件仍在处理";
-    if (completeProject?.analysis.running) return "正在分析项目素材";
+    if (includeMaterialAnalysis && completeProject?.analysis.running) return "正在分析项目素材";
     return "";
   };
   const isEditorBusy = () => Boolean(getEditorBusyReason());
