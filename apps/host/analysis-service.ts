@@ -1,13 +1,15 @@
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import { z } from "zod";
 import { HostError, type PageSession } from "./sessions.ts";
 import type { createProjects } from "./storage/projects.ts";
 import { analysisBasis, analysisTaskRecord, analysisResultRecord, analysisRecord, analysisCorrection, analysisOutput, sourceRange,
   analysisBasisDigest, validAnalysisOutput, type AnalysisTask } from "./storage/analysis-records.ts";
 import { analysisSave, prepareAnalysis, readAnalysisObject, validateAnalysisBasis, listAnalyses, type AnalysisSave } from "./storage/analyses.ts";
-import { normalizedBytes, type Save } from "./storage/records.ts";
+import { encodeId, normalizedBytes, referenceKey, type Save } from "./storage/records.ts";
 import { whisperModelId, whisperRevision, yolosModelId, yolosRevision, type createAnalysisResources } from "./whisper-resources.ts";
 import { SILERO_SPEECH_SEGMENTATION } from "../../src/config/sileroVad.js";
+import { sceneDetectToolId, sceneDetectToolRevision, type SceneDetectRunner } from "./scene-detect-runner.ts";
 
 const id = z.string().min(1).max(256);
 export const analysisSelection = z.strictObject({ inputs: z.array(analysisBasis).min(1).max(1000), force: z.boolean() });
@@ -15,6 +17,7 @@ export const analysisAction = z.discriminatedUnion("action", [
   z.strictObject({ action: z.literal("claim"), stepId: id, expectedRevision: z.number().int().positive().safe() }),
   z.strictObject({ action: z.literal("checkpoint"), stepId: id, attemptId: id, range: sourceRange, output: analysisOutput }),
   z.strictObject({ action: z.literal("finish"), stepId: id, attemptId: id, output: analysisOutput }),
+  z.strictObject({ action: z.literal("run-scene"), stepId: id, attemptId: id }),
   z.strictObject({ action: z.literal("fail"), stepId: id, attemptId: id, code: id, message: z.string().max(1024) }),
   z.strictObject({ action: z.literal("cancel"), stepId: id }),
   z.strictObject({ action: z.literal("cancelled"), stepId: id, attemptId: id }),
@@ -25,9 +28,10 @@ type Projects = ReturnType<typeof createProjects>;
 type Project = ReturnType<Projects["get"]>;
 type Lease = { pageSessionId: string; editorSessionId: string; attemptId: string; expiresAt: number };
 
-export function createAnalysisService(projects: Projects, resources: { speech: ReturnType<typeof createAnalysisResources>; detection: ReturnType<typeof createAnalysisResources>; segmentation: ReturnType<typeof createAnalysisResources> }) {
+export function createAnalysisService(projects: Projects, resources: { speech: ReturnType<typeof createAnalysisResources>; detection: ReturnType<typeof createAnalysisResources>; segmentation: ReturnType<typeof createAnalysisResources>; scene: SceneDetectRunner }) {
   const confirmations = new Map<string, { page: string; directory: string; selection: string; expiresAt: number }>();
   const leases = new Map<string, Lease>();
+  const sceneRuns = new Map<string, AbortController>();
   let tail: Promise<unknown> = Promise.resolve();
   let closing = false;
   const serialize = <T>(action: () => Promise<T>) => {
@@ -76,6 +80,81 @@ export function createAnalysisService(projects: Projects, resources: { speech: R
   const describeTask = (project: Project, value: AnalysisTask) => ({ ...value,
     steps: value.steps.map(step => ({ ...step,
       status: ["running", "cancel_requested"].includes(step.status) && !activeLease(project, step.stepId) ? "interrupted" as const : step.status })) });
+  const complete = (projectId: string, taskId: string, step: AnalysisTask["steps"][number], now: string, output: z.infer<typeof analysisOutput>) => {
+    const analysisId = randomUUID(), resultId = randomUUID();
+    step.status = "succeeded"; step.resultId = resultId; step.analysisRef = { kind: "analysis", entityId: analysisId, revision: 1 };
+    return {
+      analysis: { schemaVersion: 1, format: "material-analysis" as const, projectId, analysisId, revision: 1,
+        taskId, attemptId: step.attemptId, resultId, basis: step.basis, basisDigest: analysisBasisDigest(step.basis), output, createdAt: now },
+      result: { schemaVersion: 1, format: "material-analysis-result" as const, projectId, resultId, revision: 1,
+        taskId, attemptId: step.attemptId, registration: "registered" as const, analysisRef: step.analysisRef,
+        taskRef: { kind: "task" as const, entityId: taskId, revision: 0 } },
+    };
+  };
+  const sceneOutput = (basis: z.infer<typeof analysisBasis>, values: unknown[]) => {
+    const { sourceStartSeconds: start, sourceEndSeconds: end } = basis.range;
+    const scenes = values.map((value, index) => {
+      if (!value || typeof value !== "object") throw new HostError("OUTPUT_VALIDATION_FAILED", 422, "SceneDetect returned a malformed scene.");
+      const sourceStart = Number((value as { start_seconds?: unknown }).start_seconds);
+      const sourceEnd = Number((value as { end_seconds?: unknown }).end_seconds);
+      if (!Number.isFinite(sourceStart) || !Number.isFinite(sourceEnd) || sourceEnd <= sourceStart) {
+        throw new HostError("OUTPUT_VALIDATION_FAILED", 422, "SceneDetect returned an invalid scene range.");
+      }
+      const clippedStart = Math.max(start, sourceStart), clippedEnd = Math.min(end, sourceEnd);
+      return clippedEnd > clippedStart ? { index, range: { sourceStartSeconds: clippedStart, sourceEndSeconds: clippedEnd }, durationSeconds: clippedEnd - clippedStart } : null;
+    }).filter((value): value is { index: number; range: { sourceStartSeconds: number; sourceEndSeconds: number }; durationSeconds: number } => value !== null)
+      .sort((a, b) => a.range.sourceStartSeconds - b.range.sourceStartSeconds)
+      .map((value, index) => ({ ...value, index }));
+    const normalized = scenes.length ? scenes : [{ index: 0, range: { sourceStartSeconds: start, sourceEndSeconds: end }, durationSeconds: end - start }];
+    const epsilon = 0.0015;
+    let cursor = start;
+    for (const item of normalized) {
+      if (Math.abs(item.range.sourceStartSeconds - cursor) > epsilon) {
+        throw new HostError("OUTPUT_VALIDATION_FAILED", 422, "SceneDetect returned gaps or overlaps in the scene list.");
+      }
+      item.range.sourceStartSeconds = cursor;
+      item.durationSeconds = item.range.sourceEndSeconds - cursor;
+      cursor = item.range.sourceEndSeconds;
+    }
+    if (Math.abs(cursor - end) <= epsilon) {
+      const last = normalized.at(-1)!;
+      last.range.sourceEndSeconds = end;
+      last.durationSeconds = end - last.range.sourceStartSeconds;
+      cursor = end;
+    }
+    if (cursor !== end) throw new HostError("OUTPUT_VALIDATION_FAILED", 422, "SceneDetect did not cover the requested source range.");
+    return { text: "", language: "", words: [], samples: [], scenes: normalized, coverage: [basis.range], complete: true, missingCapabilities: [] };
+  };
+  const runScene = (page: PageSession, projectId: string, editorId: string, taskId: string, key: string, operation: z.infer<typeof analysisAction> & { action: "run-scene" }) => (async () => {
+    const project = writable(page, projectId, editorId), old = previous(project, taskId, key, operation);
+    if (old) return receipt(old, true);
+    const value = await task(project, taskId), step = value.steps.find(item => item.stepId === operation.stepId);
+    if (!step || step.basis.capability !== "scene") throw new HostError("INVALID_ARGUMENT", 400, "This step is not a SceneDetect analysis.");
+    const lease = activeLease(project, step.stepId);
+    if (step.status !== "running" || !lease || lease.attemptId !== operation.attemptId || lease.pageSessionId !== page.pageSessionId || lease.editorSessionId !== editorId) {
+      throw new HostError("ATTEMPT_STALE", 409, "This SceneDetect attempt is no longer owned by the current executor.");
+    }
+    const media = project.commits.current()?.objects.find(item => referenceKey(item) === referenceKey(step.basis.mediaRef));
+    if (!media || media.kind !== "media") throw new HostError("REFERENCE_INVALID", 409, "The SceneDetect source media is missing.");
+    const staging = `staging/analysis/${encodeId(taskId)}/${encodeId(operation.attemptId)}`;
+    await project.files.mkdir(staging);
+    const controller = new AbortController(), runKey = leaseKey(project, step.stepId);
+    if (sceneRuns.has(runKey)) throw new HostError("RESOURCE_BUSY", 409, "This SceneDetect step is already running.");
+    sceneRuns.set(runKey, controller);
+    try {
+      const detected = await resources.scene.run({ taskId, stepId: step.stepId, attemptId: step.attemptId,
+        inputPath: join(project.files.directory, media.path), outputDir: join(project.files.directory, staging),
+        outputPath: join(project.files.directory, staging, "scenes.json"), deadline: Date.now() + 30 * 60_000,
+        signal: controller.signal, readOutput: () => project.files.read(`${staging}/scenes.json`) });
+      const output = sceneOutput(step.basis, detected.scenes), now = new Date().toISOString();
+      value.previousRef = { kind: "task", entityId: taskId, revision: value.revision }; value.revision++; value.updatedAt = now;
+      const completed = complete(projectId, taskId, step, now, output);
+      completed.result.taskRef.revision = value.revision;
+      const saved = await save(project, page, editorId, taskId, key, { action: "task", operation, task: value, analysis: completed.analysis, result: completed.result });
+      if (saved.saveStatus === "succeeded") leases.delete(runKey);
+      return saved;
+    } finally { sceneRuns.delete(runKey); }
+  })();
   return {
     async findTask(page: PageSession, taskId: string) {
       for (const project of projects.opened(page)) {
@@ -137,6 +216,13 @@ export function createAnalysisService(projects: Projects, resources: { speech: R
           if (basis.capability === "detection" && (basis.model.id !== yolosModelId || basis.model.revision !== yolosRevision || basis.model.precision !== "q8")) {
             throw new HostError("INVALID_ARGUMENT", 400, "Subject detection requires the fixed YOLOS Q8 identity.");
           }
+          if (basis.capability === "scene" && (basis.model.id !== sceneDetectToolId || basis.model.revision !== sceneDetectToolRevision ||
+              basis.model.runtime !== "host-python-pyscenedetect" || !basis.settings.sceneDetection ||
+              basis.settings.sceneDetection.backend !== "pyscenedetect" || basis.settings.sceneDetection.method !== "content" ||
+              basis.settings.sceneDetection.threshold !== 27 || basis.settings.sceneDetection.minSceneLengthSeconds !== 1 ||
+              basis.settings.sceneDetection.toolRevision !== sceneDetectToolRevision)) {
+            throw new HostError("INVALID_ARGUMENT", 400, "SceneDetect requires the fixed PySceneDetect content configuration.");
+          }
           const identity = analysisBasisDigest(basis);
           if (identities.has(identity)) throw new HostError("INVALID_ARGUMENT", 400, "The same analysis input was selected twice.");
           identities.add(identity);
@@ -165,6 +251,7 @@ export function createAnalysisService(projects: Projects, resources: { speech: R
           await resources.speech.requireFiles(); await resources.segmentation.requireFiles();
         }
         if (value.steps.some(step => step.basis.capability === "detection")) await resources.detection.requireFiles();
+        if (value.steps.some(step => step.basis.capability === "scene")) await resources.scene.requireFiles();
         confirmations.delete(confirmationId);
         return save(project, page, editorId, projectId, key, { action: "task", operation: input, task: value, analysis: null, result: null });
       });
@@ -200,8 +287,14 @@ export function createAnalysisService(projects: Projects, resources: { speech: R
       return { expiresAt: new Date(lease.expiresAt).toISOString() };
     },
     act(page: PageSession, projectId: string, editorId: string, taskId: string, key: string, action: z.infer<typeof analysisAction>) {
+      const input = analysisAction.parse(action);
+      if (input.action === "run-scene") return runScene(page, projectId, editorId, taskId, key, input);
+      if (input.action === "cancel") {
+        const project = projects.get(page, projectId);
+        sceneRuns.get(leaseKey(project, input.stepId))?.abort();
+      }
       return serialize(async () => {
-        const project = writable(page, projectId, editorId), input = analysisAction.parse(action);
+        const project = writable(page, projectId, editorId);
         const old = previous(project, taskId, key, input); if (old) return receipt(old, true);
         const value = await task(project, taskId), step = value.steps.find(item => item.stepId === input.stepId);
         if (!step) throw new HostError("STEP_NOT_FOUND", 404, "Analysis step not found.");
@@ -228,13 +321,9 @@ export function createAnalysisService(projects: Projects, resources: { speech: R
           }
           case "finish": {
             if (step.status !== "running" || !validAnalysisOutput(step.basis, input.output)) throw new HostError("INVALID_ARGUMENT", 400, "The analysis output does not match its source range.");
-            const analysisId = randomUUID(), resultId = randomUUID();
-            step.status = "succeeded"; step.resultId = resultId; step.analysisRef = { kind: "analysis", entityId: analysisId, revision: 1 };
-            change.analysis = { schemaVersion: 1, format: "material-analysis", projectId, analysisId, revision: 1,
-              taskId, attemptId: step.attemptId, resultId, basis: step.basis, basisDigest: analysisBasisDigest(step.basis), output: input.output, createdAt: now };
-            change.result = { schemaVersion: 1, format: "material-analysis-result", projectId, resultId, revision: 1,
-              taskId, attemptId: step.attemptId, registration: "registered", analysisRef: step.analysisRef,
-              taskRef: { kind: "task", entityId: taskId, revision: value.revision } }; break;
+            const completed = complete(projectId, taskId, step, now, input.output);
+            completed.result.taskRef.revision = value.revision;
+            change.analysis = completed.analysis; change.result = completed.result; break;
           }
           case "fail":
             if (!["running", "cancel_requested"].includes(step.status)) throw new HostError("TASK_TERMINAL", 409, "This step is no longer running.");
@@ -294,6 +383,6 @@ export function createAnalysisService(projects: Projects, resources: { speech: R
         return save(project, page, editorId, saveId, key, value);
       });
     },
-    async close() { closing = true; await tail; leases.clear(); confirmations.clear(); },
+    async close() { closing = true; for (const controller of sceneRuns.values()) controller.abort(); sceneRuns.clear(); await tail; leases.clear(); confirmations.clear(); },
   };
 }

@@ -26,6 +26,7 @@ import { createPlanningConfig } from "./planning-config.ts";
 import { createPlanningService } from "./planning-service.ts";
 import { registerPlanningRoutes } from "./planning-routes.ts";
 import { createAnalysisResources } from "./whisper-resources.ts";
+import { createSceneDetectRunner } from "./scene-detect-runner.ts";
 import { analysisTaskRecord } from "./storage/analysis-records.ts";
 
 const text = { type: "string", minLength: 1, maxLength: 256 };
@@ -73,6 +74,7 @@ const analysisReceipt = object({ saveId: text, saveStatus: { enum: ["queued", "w
 
 export async function startHost(options: {
   instanceId: string; proof: string; dist: string; storageExecutable?: string; machineDirectory?: string;
+  openMontageRoot?: string; pythonExecutable?: string;
   openBrowser: (url: string) => Promise<void>;
   release: () => Promise<void>;
 }) {
@@ -87,7 +89,8 @@ export async function startHost(options: {
   const whisper = createAnalysisResources(options.machineDirectory, "whisper-small-q8");
   const yolos = createAnalysisResources(options.machineDirectory, "yolos-tiny-q8");
   const silero = createAnalysisResources(options.machineDirectory, "silero-vad");
-  const analyses = createAnalysisService(projects, { speech: whisper, detection: yolos, segmentation: silero });
+  const scene = createSceneDetectRunner(options.openMontageRoot, options.pythonExecutable);
+  const analyses = createAnalysisService(projects, { speech: whisper, detection: yolos, segmentation: silero, scene });
   const planningConfig = createPlanningConfig(options.machineDirectory, options.storageExecutable ?? join(dirname(options.dist), "autocut-storage"));
   const planning = createPlanningService(projects, planningConfig);
   const selections = createFileSelections();

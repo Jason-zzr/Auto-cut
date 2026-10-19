@@ -29,7 +29,7 @@ export async function validateAnalysisBasis(files: ProjectFiles, current: Manife
   const asset = assetRecord.parse(await readAnalysisObject(files, current, basis.assetRef));
   if (asset.sha256 !== basis.contentSha256 || referenceKey(asset.mediaRef) !== referenceKey(basis.mediaRef) ||
       asset.assetId !== basis.mediaRef.entityId || (asset.kind === "image" &&
-      (basis.range.sourceStartSeconds !== 0 || basis.range.sourceEndSeconds !== 0 || basis.capability === "speech")) ||
+      (basis.range.sourceStartSeconds !== 0 || basis.range.sourceEndSeconds !== 0 || basis.capability === "speech" || basis.capability === "scene")) ||
       (asset.kind !== "image" && basis.range.sourceEndSeconds <= basis.range.sourceStartSeconds) ||
       (asset.kind === "audio" && basis.capability !== "speech")) {
     throw new HostError("REFERENCE_INVALID", 409, "Analysis input does not match the source asset.");

@@ -8,7 +8,7 @@ const text = z.string().max(16384);
 export const scriptRef = z.strictObject({ kind: z.literal("script"), entityId: id, revision });
 export const scriptSource = z.strictObject({ sourceId: id, assetRef: analysisBasis.shape.assetRef,
   mediaRef: analysisBasis.shape.mediaRef, analysisRef: analysisRef.nullable(), range: sourceRange,
-  kind: z.enum(["image", "video", "audio"]), capability: z.enum(["speech", "visual", "detection", "description", "unanalysed"]),
+  kind: z.enum(["image", "video", "audio"]), capability: z.enum(["speech", "visual", "detection", "description", "scene", "unanalysed"]),
   originalText: text, visualNotes: text, labels: z.array(id).max(100) });
 export const scriptGoals = z.strictObject({ theme: text, style: text,
   durationSeconds: z.number().positive().max(86400).nullable() });

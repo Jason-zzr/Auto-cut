@@ -6,7 +6,7 @@ import { analyzeSourceVisual } from "../lib/materialVisual.js";
 export function useMaterialAnalysis({ hostSession, getContext, isEditorBusy }) {
   const latest = useRef({ getContext, isEditorBusy });
   latest.current = { getContext, isEditorBusy };
-  const controller = useRef(null), pending = useRef(null);
+  const controller = useRef(null), pending = useRef(null), active = useRef(null);
   const [state, setState] = useState({ running: false, phase: "", error: "", tasks: [], pendingSave: null });
   const trusted = event => { if (!event?.isTrusted) throw new Error("请从素材分析面板直接操作。"); };
   const context = async () => {
@@ -55,6 +55,7 @@ export function useMaterialAnalysis({ hostSession, getContext, isEditorBusy }) {
         await saveOperation(taskId, { action: "claim", stepId: selected.stepId, expectedRevision: task.revision });
         task = await request(`analysis-tasks/${encodeURIComponent(taskId)}`);
         const step = task.steps.find(step => step.stepId === selected.stepId);
+        active.current = { taskId, stepId: step.stepId };
         timer = setInterval(async () => {
           if (heartbeatPending || abort.signal.aborted) return;
           heartbeatPending = true;
@@ -73,6 +74,11 @@ export function useMaterialAnalysis({ hostSession, getContext, isEditorBusy }) {
         try {
           const asset = await request(`assets/${encodeURIComponent(step.basis.assetRef.entityId)}`);
           const src = projectMediaUrl(initial.projectId, step.basis.mediaRef);
+          if (step.basis.capability === "scene") {
+            await saveOperation(taskId, { action: "run-scene", stepId: step.stepId, attemptId: step.attemptId });
+            await refresh();
+            continue;
+          }
           const output = step.basis.capability === "speech"
             ? await analyzeSourceSpeech(src, step, { signal: abort.signal, onProgress, checkpoint, localModelRoot: "/local-components/whisper/" })
             : await analyzeSourceVisual(src, asset, step, { signal: abort.signal, onProgress, checkpoint });
@@ -86,14 +92,17 @@ export function useMaterialAnalysis({ hostSession, getContext, isEditorBusy }) {
           }
           await saveOperation(taskId, { action: "fail", stepId: step.stepId, attemptId: step.attemptId,
             code: error.code || "ANALYSIS_FAILED", message: String(error.message || error).slice(0, 1024) });
-        } finally { clearInterval(timer); }
+        } finally {
+          clearInterval(timer);
+          if (active.current?.taskId === taskId && active.current.stepId === step.stepId) active.current = null;
+        }
         await refresh();
       }
       setState(old => ({ ...old, phase: "本轮分析已结束，请查看各素材结果" }));
     } catch (error) {
       setState(old => ({ ...old, error: abort.signal.aborted && !pending.current ? "分析已停止；已保存的区间仍可继续使用。" : error.message }));
     } finally {
-      clearInterval(timer); controller.current = null;
+      clearInterval(timer); active.current = null; controller.current = null;
       setState(old => ({ ...old, running: false }));
       await refresh().catch(() => {});
     }
@@ -120,7 +129,11 @@ export function useMaterialAnalysis({ hostSession, getContext, isEditorBusy }) {
       if (stepId) await saveOperation(taskId, { action: "retry", stepId, expectedRevision: task.revision });
       void run(taskId).catch(error => setState(old => ({ ...old, error: error.message })));
     },
-    async cancel(event) { trusted(event); controller.current?.abort(); },
+    async cancel(event) {
+      trusted(event); const current = active.current; controller.current?.abort();
+      if (current) await request(`analysis-tasks/${encodeURIComponent(current.taskId)}/actions`,
+        { operation: { action: "cancel", stepId: current.stepId } }, crypto.randomUUID(), { signal: AbortSignal.timeout(300_000) }).catch(() => {});
+    },
     async correct(event, analysisId, expectedRevision, correction) {
       trusted(event);
       const result = await request(`analyses/${encodeURIComponent(analysisId)}/revisions`, { expectedRevision, correction }, crypto.randomUUID(),

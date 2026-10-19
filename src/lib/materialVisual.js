@@ -37,7 +37,7 @@ export async function analyzeSourceVisual(src, asset, step, { signal, onProgress
     signal.throwIfAborted();
     if (capability === "description") {
       const support = await probeBuiltInAI("en");
-      if (support.availability !== "available") return { text: "", language: "en", words: [], samples: [], coverage: [],
+      if (support.availability !== "available") return { text: "", language: "en", words: [], samples: [], scenes: [], coverage: [],
         complete: false, missingCapabilities: ["browser-image-description"] };
       session = await createFrameCaptionSession({ language: "en", signal });
     } else if (capability === "detection") detector = createSourceDetector(signal, onProgress);
@@ -87,13 +87,13 @@ export async function analyzeSourceVisual(src, asset, step, { signal, onProgress
       }
       const range = { sourceStartSeconds: from, sourceEndSeconds: to };
       const output = { text: samples.map(sample => sample.description).filter(Boolean).join("\n"), language: capability === "description" ? "en" : "",
-        words: [], samples, coverage: [range], complete: true, missingCapabilities: [] };
+        words: [], samples, scenes: [], coverage: [range], complete: true, missingCapabilities: [] };
       signal.throwIfAborted();
       if (!image) await checkpoint(range, output);
       outputs.push(output); from = to;
       if (image) break;
     } while (from < end);
     return { text: outputs.map(output => output.text).filter(Boolean).join("\n"), language: capability === "description" ? "en" : "",
-      words: [], samples: outputs.flatMap(output => output.samples), coverage: outputs.flatMap(output => output.coverage), complete: true, missingCapabilities: [] };
+      words: [], samples: outputs.flatMap(output => output.samples), scenes: [], coverage: outputs.flatMap(output => output.coverage), complete: true, missingCapabilities: [] };
   } finally { signal.removeEventListener("abort", stop); source?.close(); image?.close(); detector?.close(); stop(); }
 }

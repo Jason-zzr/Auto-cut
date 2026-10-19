@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { AUTOMATIC_CAPTION_MODEL_ID, AUTOMATIC_CAPTION_MODEL_REVISION, YOLOS_TINY_MODEL_ID, YOLOS_TINY_MODEL_REVISION } from "../config/models.js";
 import { SILERO_SPEECH_SEGMENTATION } from "../config/sileroVad.js";
 
-const labels = { speech: "语音转写", visual: "场景、运动与画质", detection: "主体检测", description: "画面描述" };
+const labels = { speech: "语音转写", scene: "镜头分段", visual: "场景、运动与画质", detection: "主体检测", description: "画面描述" };
 const statuses = { queued: "等待执行", running: "分析中", cancel_requested: "正在取消", cancelled: "已取消", interrupted: "已中断", failed: "失败", succeeded: "结果已保存" };
 const models = {
   speech: { id: AUTOMATIC_CAPTION_MODEL_ID, revision: AUTOMATIC_CAPTION_MODEL_REVISION, precision: "q8", runtime: "transformers.js-3.8.1-wasm" },
+  scene: { id: "openmontage.scene_detect", revision: "0.1.0", precision: "cpu", runtime: "host-python-pyscenedetect" },
   visual: { id: "auto-edit-frame-metrics", revision: "9ad65c06a30519f8f1db7bad3182843c23b914c6", precision: "js", runtime: "browser-worker" },
   detection: { id: YOLOS_TINY_MODEL_ID, revision: YOLOS_TINY_MODEL_REVISION, precision: "q8", runtime: "transformers.js-3.8.1-wasm" },
   description: { id: "browser-language-model", revision: null, precision: "browser-managed", runtime: "browser-language-model" },
@@ -47,8 +48,9 @@ export function MaterialAnalysisPanel({ analysis, assets }) {
   }, [analysis.running]);
   const choose = item => {
     setChosen(item);
-    setCorrection(structuredClone(item.correction?.correction || { text: item.raw.output.text,
-      intervals: [{ range: item.raw.basis.range, text: item.raw.output.text, labels: [], visualNotes: "" }] }));
+    setCorrection(structuredClone(item.correction?.correction || (item.raw.basis.capability === "scene"
+      ? { text: "", intervals: item.raw.output.scenes.map(scene => ({ range: scene.range, text: "", labels: [], visualNotes: "" })) }
+      : { text: item.raw.output.text, intervals: [{ range: item.raw.basis.range, text: item.raw.output.text, labels: [], visualNotes: "" }] })));
   };
   const start = async event => {
     const inputs = [];
@@ -59,10 +61,11 @@ export function MaterialAnalysisPanel({ analysis, assets }) {
       if (!Number.isFinite(range.sourceEndSeconds) || range.sourceStartSeconds < 0 ||
           (asset.kind !== "image" && range.sourceEndSeconds <= range.sourceStartSeconds)) throw new Error(`请填写「${asset.name}」有效的源起止时间。`);
       for (const capability of capabilities) {
-        if ((asset.kind === "image" && capability === "speech") || (asset.kind === "audio" && capability !== "speech")) continue;
+        if ((asset.kind === "image" && (capability === "speech" || capability === "scene")) || (asset.kind === "audio" && capability !== "speech")) continue;
         inputs.push({ assetRef: { kind: "asset", entityId: asset.assetId, revision: asset.revision }, mediaRef: asset.mediaRef,
           contentSha256: asset.sha256, range, capability, model: models[capability], settings: { language: "zh", sampleIntervalSeconds: 1,
-            ...(capability === "speech" ? { speechSegmentation: { ...SILERO_SPEECH_SEGMENTATION } } : {}) } });
+            ...(capability === "speech" ? { speechSegmentation: { ...SILERO_SPEECH_SEGMENTATION } } : {}),
+            ...(capability === "scene" ? { sceneDetection: { backend: "pyscenedetect", method: "content", threshold: 27, minSceneLengthSeconds: 1, toolRevision: "0.1.0" } } : {}) } });
       }
     }
     if (!inputs.length) throw new Error("请选择适用于当前素材的分析能力。");
@@ -134,27 +137,32 @@ export function MaterialAnalysisPanel({ analysis, assets }) {
         ["kind", "entityId", "blobId"].some(field => asset.mediaRef[field] !== basis.mediaRef[field]) ||
         Object.entries(models[basis.capability]).some(([field, value]) => basis.model[field] !== value) ||
         basis.settings.language !== "zh" || basis.settings.sampleIntervalSeconds !== 1 ||
+        (basis.capability === "scene" && (!basis.settings.sceneDetection || basis.settings.sceneDetection.backend !== "pyscenedetect" ||
+          basis.settings.sceneDetection.method !== "content" || basis.settings.sceneDetection.threshold !== 27 ||
+          basis.settings.sceneDetection.minSceneLengthSeconds !== 1 || basis.settings.sceneDetection.toolRevision !== "0.1.0")) ||
         (basis.capability === "speech" && Object.entries(SILERO_SPEECH_SEGMENTATION).some(([field, value]) => basis.settings.speechSegmentation?.[field] !== value)) ||
         (asset.kind !== "image" && selected?.start !== undefined && Number(selected.start) !== basis.range.sourceStartSeconds) ||
         (asset.kind !== "image" && selected?.end !== undefined && selected.end !== "" && Number(selected.end) !== basis.range.sourceEndSeconds);
       return <li key={item.raw.analysisId}><div>{asset?.name}
       <small>{labels[item.raw.basis.capability]} · {item.raw.basis.range.sourceStartSeconds}–{item.raw.basis.range.sourceEndSeconds} 秒 ·
-        {item.raw.output.complete ? "完整" : `部分结果：${item.raw.output.missingCapabilities.join("、")}`} · {item.correction ? `人工修订 ${item.correction.revision}` : "原始结果"}</small></div>
+        {item.raw.output.complete ? "完整" : `部分结果：${item.raw.output.missingCapabilities.join("、")}`} {basis.capability === "scene" ? `· ${item.raw.output.scenes.length} 个镜头` : ""} · {item.correction ? `人工修订 ${item.correction.revision}` : "原始结果"}</small></div>
       {basisChanged ? <p role="status">依据已变化，当前选择需重新分析；旧结果和人工修订仍保留。</p> : null}
       <button onClick={() => choose(item)}>查看与校订</button></li>;
     })}</ul>
     {chosen && correction ? <div className="analysis-correction">
       <details><summary>原始分析与来源</summary><pre>{JSON.stringify(chosen.raw, null, 2)}</pre></details>
-      <label>校订文本<textarea value={correction.text} onChange={event => setCorrection(value => ({ ...value, text: event.target.value }))} /></label>
+      {chosen.raw.basis.capability !== "scene" ? <label>校订文本<textarea value={correction.text} onChange={event => setCorrection(value => ({ ...value, text: event.target.value }))} /></label> : null}
       {correction.intervals.map((interval, index) => <fieldset key={index} disabled={loading}>
         <legend>源区间 {index + 1}</legend>
         {[["sourceStartSeconds", "起点"], ["sourceEndSeconds", "终点"]].map(([field, label]) => <label key={field}>{label}（秒）
           <input type="number" min={chosen.raw.basis.range.sourceStartSeconds} max={chosen.raw.basis.range.sourceEndSeconds} step="0.001"
             value={interval.range[field]} onChange={event => setCorrection(value => ({ ...value, intervals: value.intervals.map((item, position) => position === index
               ? { ...item, range: { ...item.range, [field]: Number(event.target.value) } } : item) }))} /></label>)}
-        <label>区间文本<textarea value={interval.text} onChange={event => setCorrection(value => ({ ...value, intervals: value.intervals.map((item, position) => position === index ? { ...item, text: event.target.value } : item) }))} /></label>
-        <label>多标签（每行一个）<textarea value={interval.labels.join("\n")} onChange={event => setCorrection(value => ({ ...value, intervals: value.intervals.map((item, position) => position === index ? { ...item, labels: event.target.value.split("\n") } : item) }))} /></label>
-        <label>画面备注<textarea value={interval.visualNotes} onChange={event => setCorrection(value => ({ ...value, intervals: value.intervals.map((item, position) => position === index ? { ...item, visualNotes: event.target.value } : item) }))} /></label>
+        {chosen.raw.basis.capability !== "scene" ? <>
+          <label>区间文本<textarea value={interval.text} onChange={event => setCorrection(value => ({ ...value, intervals: value.intervals.map((item, position) => position === index ? { ...item, text: event.target.value } : item) }))} /></label>
+          <label>多标签（每行一个）<textarea value={interval.labels.join("\n")} onChange={event => setCorrection(value => ({ ...value, intervals: value.intervals.map((item, position) => position === index ? { ...item, labels: event.target.value.split("\n") } : item) }))} /></label>
+          <label>画面备注<textarea value={interval.visualNotes} onChange={event => setCorrection(value => ({ ...value, intervals: value.intervals.map((item, position) => position === index ? { ...item, visualNotes: event.target.value } : item) }))} /></label>
+        </> : null}
         <button onClick={() => perform(() => play(assets.find(asset => asset.assetId === chosen.raw.basis.assetRef.entityId), interval.range))}>回放此源区间</button>
         <button onClick={() => setCorrection(value => ({ ...value, intervals: value.intervals.filter((_, position) => position !== index) }))}>移除此区间</button>
       </fieldset>)}

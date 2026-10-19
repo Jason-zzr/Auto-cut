@@ -23,7 +23,8 @@ export async function listScriptSources(files: ProjectFiles, current: Manifest |
     if (!current?.roots.assets.some(ref => ref.entityId === raw.basis.assetRef.entityId && ref.revision === raw.basis.assetRef.revision)) continue;
     const asset = assetRecord.parse(await readScriptObject(files, current, raw.basis.assetRef));
     const ranges = analysis.format === "material-analysis-correction" && analysis.correction.intervals.length ?
-      analysis.correction.intervals : [{ range: raw.basis.range,
+      analysis.correction.intervals : raw.basis.capability === "scene" ? raw.output.scenes.map(scene => ({ range: scene.range,
+        text: "", labels: [], visualNotes: "" })) : [{ range: raw.basis.range,
         text: analysis.format === "material-analysis-correction" ? analysis.correction.text : raw.output.text,
         labels: [], visualNotes: raw.output.samples.map(item => item.description || item.detections.map(value => value.label).join(", ")).join("\n") }];
     for (const [index, range] of ranges.entries()) items.push(scriptSource.parse({ sourceId: `${analysis.analysisId}:${analysis.revision}:${index}`,
@@ -75,15 +76,17 @@ export async function validateScriptSources(files: ProjectFiles, current: Manife
     const intervals = analysis.format === "material-analysis-correction" ? analysis.correction.intervals.filter(item =>
       item.range.sourceStartSeconds === source.range.sourceStartSeconds && item.range.sourceEndSeconds === source.range.sourceEndSeconds) : [];
     const words = raw.output.words.filter(word => word.sourceStartSeconds >= source.range.sourceStartSeconds && word.sourceEndSeconds <= source.range.sourceEndSeconds);
-    const expected = analysis.format === "material-analysis-correction" ? (intervals.length ? intervals.map(item => item.text).join("\n") : whole ? analysis.correction.text : "") :
-      whole ? raw.output.text : words.map(word => word.text).join("");
+    const expected = raw.basis.capability === "scene" ? "" :
+      analysis.format === "material-analysis-correction" ? (intervals.length ? intervals.map(item => item.text).join("\n") : whole ? analysis.correction.text : "") :
+        whole ? raw.output.text : words.map(word => word.text).join("");
     if (source.originalText !== expected || (!whole && analysis.format === "material-analysis-correction" && !intervals.length)) {
       throw new HostError("REFERENCE_INVALID", 409, "Original words must come from the exact saved analysis range.");
     }
-    const visualNotes = analysis.format === "material-analysis-correction" && intervals.length ? intervals.map(item => item.visualNotes).join("\n") :
-      raw.output.samples.filter(item => item.sourceTimeSeconds >= source.range.sourceStartSeconds && item.sourceTimeSeconds <= source.range.sourceEndSeconds)
-        .map(item => item.description || item.detections.map(value => value.label).join(", ")).join("\n");
-    const labels = analysis.format === "material-analysis-correction" ? intervals.flatMap(item => item.labels) : [];
+    const visualNotes = raw.basis.capability === "scene" ? "" :
+      analysis.format === "material-analysis-correction" && intervals.length ? intervals.map(item => item.visualNotes).join("\n") :
+        raw.output.samples.filter(item => item.sourceTimeSeconds >= source.range.sourceStartSeconds && item.sourceTimeSeconds <= source.range.sourceEndSeconds)
+          .map(item => item.description || item.detections.map(value => value.label).join(", ")).join("\n");
+    const labels = raw.basis.capability === "scene" ? [] : analysis.format === "material-analysis-correction" ? intervals.flatMap(item => item.labels) : [];
     if (source.visualNotes !== visualNotes || JSON.stringify(source.labels) !== JSON.stringify(labels)) {
       throw new HostError("REFERENCE_INVALID", 409, "Source descriptions must come from the saved analysis. Edit classification or script suggestions separately.");
     }

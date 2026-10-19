@@ -122,12 +122,12 @@ export async function analyzeSourceSpeech(src, step, { signal, onProgress, check
         }
       }
       const range = { sourceStartSeconds: from, sourceEndSeconds: to };
-      const output = { text: words.map(word => word.text).join(""), words, language: [...languages].join(","), samples: [],
+      const output = { text: words.map(word => word.text).join(""), words, language: [...languages].join(","), samples: [], scenes: [],
         coverage: [range], complete: true, missingCapabilities: [] };
       await checkpoint(range, output); outputs.push(output); from = to;
     }
     return { text: outputs.map(output => output.text).join(""), words: outputs.flatMap(output => output.words),
-      language: [...new Set(outputs.flatMap(output => output.language.split(",")).filter(Boolean))].join(","), samples: [],
+      language: [...new Set(outputs.flatMap(output => output.language.split(",")).filter(Boolean))].join(","), samples: [], scenes: [],
       coverage: outputs.flatMap(output => output.coverage), complete: true, missingCapabilities: [] };
   } finally { source.close(); }
 }
