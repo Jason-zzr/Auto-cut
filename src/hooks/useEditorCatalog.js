@@ -153,9 +153,10 @@ export function useEditorCatalog(voiceFilter) {
           : pexelsKey
             ? await searchPexels(libraryType, query, pexelsKey, controller.signal)
             : await searchCommons(libraryType, query, controller.signal);
+        if (controller.signal.aborted) return;
         setBuiltInAssets(assets); setLibraryStatus("ready");
       } catch (error) {
-        if (error.name === "AbortError") return;
+        if (controller.signal.aborted || error.name === "AbortError") return;
         setBuiltInAssets([]); setLibraryStatus("error"); setLibraryError(error.message || "Unable to load media");
       }
     }, 320);
@@ -163,6 +164,11 @@ export function useEditorCatalog(voiceFilter) {
   }, [libraryQuery, libraryType, pexelsKey]);
 
   const selectLibraryType = (type) => { setLibraryType(type); setLibraryQuery(DEFAULT_QUERY[type]); };
+  const searchLibrary = (type, query) => {
+    if (type === libraryType && query === libraryQuery) return;
+    setBuiltInAssets([]); setLibraryStatus("loading"); setLibraryError("");
+    setLibraryType(type); setLibraryQuery(query);
+  };
   const prefetchLibraryAsset = async (asset) => {
     if (!asset?.src || !/^https?:/i.test(asset.src) || assetDownloadStates[asset.id]?.status === "ready") return;
     setAssetDownloadStates((states) => ({ ...states, [asset.id]: { status: "loading", progress: states[asset.id]?.progress || 0 } }));
@@ -178,5 +184,5 @@ export function useEditorCatalog(voiceFilter) {
       setAssetDownloadStates((states) => ({ ...states, [asset.id]: { status: "error", progress: 0 } }));
     }
   };
-  return { builtInAssets, filteredVoices, libraryType, libraryQuery, setLibraryQuery, selectLibraryType, libraryStatus, libraryError, assetDownloadStates, prefetchLibraryAsset, libraryProvider: libraryType === "vector" ? "Timeline Studio" : libraryType === "audio" ? "Openverse Music" : pexelsKey ? "Pexels" : "Wikimedia Commons" };
+  return { builtInAssets, filteredVoices, libraryType, libraryQuery, setLibraryQuery, selectLibraryType, searchLibrary, libraryStatus, libraryError, assetDownloadStates, prefetchLibraryAsset, libraryProvider: libraryType === "vector" ? "Timeline Studio" : libraryType === "audio" ? "Openverse Music" : pexelsKey ? "Pexels" : "Wikimedia Commons" };
 }

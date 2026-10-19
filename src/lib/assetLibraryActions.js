@@ -1,6 +1,34 @@
 import { decodeWaveform } from "./media.js";
 import { loadProjectMediaBlob } from "./projectSnapshot.js";
 
+export function inspectAssetReferences(asset, project, library = []) {
+  const ids = new Set([asset.id, asset.assetId].filter(Boolean));
+  const urls = new Set([asset.src, asset.url].filter(Boolean));
+  const matches = value => value && typeof value === "object" && (
+    [value.assetId, value.sourceAssetId, value.depthMapSourceAssetId, value.sourceAudioOriginAssetId].some(id => ids.has(id))
+    || [value.src, value.url].some(url => urls.has(url)) || asset.blob && value.blob === asset.blob);
+  const contains = (value, seen = new WeakSet()) => {
+    if (!value || typeof value !== "object" || value instanceof Blob || value instanceof ArrayBuffer || ArrayBuffer.isView(value) || seen.has(value)) return false;
+    seen.add(value);
+    return Boolean(matches(value) || Object.values(value).some(child => contains(child, seen)));
+  };
+  const references = [];
+  for (const [track, key] of Object.entries({ visuals: "visualSegments", overlays: "visualOverlaySegments", audio: "audioSegments", music: "musicSegments", stickers: "stickerSegments" })) {
+    for (const clip of project[key] || []) {
+      if (contains(clip)) references.push({ track, clipId: clip.id, relation: matches(clip) ? "direct" : "retained-media" });
+    }
+  }
+  for (const [track, key] of [["source", "sourceAudioBlob"], ["music", "musicBlob"], ["audio", "audioBlob"]]) {
+    if (asset.blob && project[key] === asset.blob || track === "source" && project.sourceAudioBlob && ids.has(project.sourceAudioAssetId)) {
+      references.push({ track, relation: "shared-track-media" });
+    }
+  }
+  for (const item of library) {
+    if (item.id !== asset.id && contains(item)) references.push({ track: "library", assetId: item.assetId || item.id, relation: "shared-media" });
+  }
+  return references;
+}
+
 export function createAssetLibraryActions(deps) {
   async function selectAsset(asset, options = {}) {
     if (asset.type === "audio") {

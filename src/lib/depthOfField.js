@@ -1,4 +1,5 @@
 import { normalizeRelight, renderRelighting } from "./videoRelighting.js";
+import { getVisionKey } from "./vision.js";
 export const DEPTH_MODEL_REPOSITORY = "timeline-studio-onnx-models";
 export const DEPTH_MODEL_PATH = "depth-anything-v2-small";
 export const DEPTH_MODEL_HUGGING_FACE_REVISION = "a0806c6fb9484894dcb78df523156d244461515d";
@@ -29,6 +30,56 @@ export function getDepthAnalysisSignature(segment, quality = "balanced") {
     playbackRate: segment?.playbackRate, speedCurve: segment?.speedCurve,
     quality, samplingVersion: 3, refinement: 2, model: DEPTH_MODEL_HUGGING_FACE_REVISION,
   });
+}
+
+export function getSegmentDepthAnalysis(segment, records) {
+  const candidates = [records?.[getVisionKey(segment)], segment?.depth].filter(Boolean);
+  return candidates.filter(record => {
+    try { return record.signature === getDepthAnalysisSignature(segment, JSON.parse(record.signature).quality); }
+    catch { return false; }
+  }).sort((a, b) => (b.analyzedAt || 0) - (a.analyzedAt || 0))[0] || null;
+}
+
+export const DEPTH_ANALYSIS_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["samples", "sourceSize", "duration", "fps", "model", "signature", "complete", "analyzedAt"],
+  properties: {
+    complete: { const: true }, signature: { type: "string", minLength: 1, maxLength: 16384 },
+    model: { type: "string", minLength: 1, maxLength: 256 }, analyzedAt: { type: "number", minimum: 0 },
+    duration: { type: "number", minimum: 0 }, fps: { type: "number", exclusiveMinimum: 0, maximum: 24 },
+    sourceSize: { type: "object", additionalProperties: false, required: ["width", "height"],
+      properties: { width: { type: "integer", minimum: 1 }, height: { type: "integer", minimum: 1 } } },
+    samples: { type: "array", minItems: 1, maxItems: 720, items: {
+      type: "object", additionalProperties: false, required: ["time", "sourceTime", "depthUrl", "width", "height"],
+      properties: { time: { type: "number", minimum: 0 }, sourceTime: { type: "number", minimum: 0 },
+        depthUrl: { type: "string", minLength: 1, maxLength: 4096 },
+        width: { type: "integer", minimum: 1, maximum: 1024 }, height: { type: "integer", minimum: 1, maximum: 1024 } },
+    } },
+  },
+};
+
+export function validateDepthAnalysis(analysis, segment) {
+  const valid = (value, schema) => {
+    if (schema.const !== undefined) return value === schema.const;
+    if (schema.type === "object") return value && typeof value === "object" && !Array.isArray(value)
+      && schema.required.every(key => Object.hasOwn(value, key))
+      && Object.keys(value).every(key => Object.hasOwn(schema.properties, key) && valid(value[key], schema.properties[key]));
+    if (schema.type === "array") return Array.isArray(value) && value.length >= schema.minItems && value.length <= schema.maxItems && value.every(item => valid(item, schema.items));
+    if (schema.type === "string") return typeof value === "string" && value.length >= schema.minLength && value.length <= schema.maxLength;
+    return typeof value === "number" && Number.isFinite(value) && (schema.type !== "integer" || Number.isInteger(value))
+      && (schema.minimum === undefined || value >= schema.minimum) && (schema.exclusiveMinimum === undefined || value > schema.exclusiveMinimum)
+      && (schema.maximum === undefined || value <= schema.maximum);
+  };
+  if (!valid(analysis, DEPTH_ANALYSIS_SCHEMA)) throw new TypeError("Invalid depth analysis");
+  let signature;
+  try { signature = JSON.parse(analysis.signature); } catch { throw new TypeError("Invalid depth source signature"); }
+  if (!["fast", "balanced", "quality"].includes(signature?.quality)
+    || analysis.signature !== getDepthAnalysisSignature({ ...segment, src: "" }, signature.quality)) throw new TypeError("Depth source changed");
+  if (analysis.duration !== (segment.type === "video" ? Math.max(0.05, Number(segment.duration) || 0.05) : 0)
+    || analysis.samples.some((sample, index) => (!sample.depthUrl.startsWith("blob:") && !sample.depthUrl.startsWith("/api/v1/projects/"))
+      || index > 0 && sample.time <= analysis.samples[index - 1].time
+      || sample.time > analysis.duration)) throw new TypeError("Invalid depth samples");
+  return signature.quality;
 }
 
 export function normalizeCinematicDepth(value) {

@@ -188,6 +188,11 @@ export function createCaptionEditingActions(d) {
           }
         : records;
     });
+    const disableClipVision = (items) => items.map((item) => item.id === d.previewVisualSegment?.id && item.vision?.options?.avoidCaptions
+      ? { ...item, vision: { ...item.vision, options: { ...item.vision.options, avoidCaptions: false } } }
+      : item);
+    d.setVisualSegments?.(disableClipVision);
+    d.setVisualOverlaySegments?.(disableClipVision);
     return true;
   }
 

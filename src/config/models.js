@@ -1,4 +1,5 @@
 export const MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
+export const VOCAL_SEPARATION_MODEL_REVISION = "927cd9272154b85c53518daf44063ee033ee22c3";
 // Attention outputs are required for real word-level alignment. The plain
 // whisper-small export cannot satisfy return_timestamps: "word".
 export const AUTOMATIC_CAPTION_MODEL_ID = "onnx-community/whisper-small_timestamped";

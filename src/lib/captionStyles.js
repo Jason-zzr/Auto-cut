@@ -151,9 +151,9 @@ export function applyCaptionPresetToStyle(currentStyle, preset) {
   };
 }
 
-export function buildCaptionPresetSnapshot(name, captionStyle, captionSize) {
+export function buildCaptionPresetSnapshot(name, captionStyle, captionSize, id = `caption-style-${crypto.randomUUID()}`) {
   return {
-    id: `caption-style-${crypto.randomUUID()}`,
+    id,
     name,
     captionSize,
     style: Object.fromEntries(CAPTION_VISUAL_STYLE_KEYS.map((key) => [key, captionStyle[key]])),

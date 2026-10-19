@@ -75,6 +75,7 @@ export function useGenerationPlugins({ imageUrlRefs, notify, setActiveTool, setM
           ...current[providerId],
           ...result,
           state: "connected",
+          connectionId: crypto.randomUUID(),
           error: "",
           errorCode: "",
         },
@@ -108,14 +109,20 @@ export function useGenerationPlugins({ imageUrlRefs, notify, setActiveTool, setM
     setJob(createIdleGenerationJob());
   }, [cancelProviderConnect, connections]);
 
-  const generateProvider = useCallback(async (providerId, request) => {
-    if (connections[providerId]?.state !== "connected" || activeJobRef.current) return;
+  const generateProvider = useCallback(async (providerId, request, { signal, connectionId } = {}) => {
+    if (signal?.aborted) return { status: "cancelled", providerId, remoteOutcome: "not-started" };
+    if (connections[providerId]?.state !== "connected") return { status: "unavailable", providerId, remoteOutcome: "not-started" };
+    if (connectionId && connections[providerId].connectionId !== connectionId) return { status: "unavailable", providerId, remoteOutcome: "not-started" };
+    if (activeJobRef.current) return { status: "busy", providerId, remoteOutcome: "not-started" };
     const adapter = getGenerationAdapter(providerId);
     const controller = new AbortController();
+    const abort = () => controller.abort();
+    signal?.addEventListener("abort", abort, { once: true });
     activeJobRef.current = { providerId, controller };
     setJob({ state: "running", providerId, progress: null, message: "generating", assetId: "" });
+    let result;
     try {
-      const result = await adapter.generate({
+      result = await adapter.generate({
         request,
         connection: connections[providerId],
         signal: controller.signal,
@@ -130,21 +137,40 @@ export function useGenerationPlugins({ imageUrlRefs, notify, setActiveTool, setM
           }
         },
       });
-      if (!mountedRef.current || activeJobRef.current?.controller !== controller) return;
+      if (controller.signal.aborted || !mountedRef.current || activeJobRef.current?.controller !== controller) {
+        if (mountedRef.current && activeJobRef.current?.controller === controller) {
+          setJob({ state: "cancelled", providerId, progress: null, message: "cancelled", assetId: "" });
+        }
+        return { status: "cancelled", providerId, remoteOutcome: "succeeded", outputs: result.outputs, providerJobId: result.jobId };
+      }
       const committed = await commitGenerationOutputs(result.outputs, {
         imageUrlRefs,
         notify,
         setSelectedLibraryAssetId,
         setUserAssets,
       });
-      if (!mountedRef.current || activeJobRef.current?.controller !== controller) return;
-      setJob({ state: "complete", providerId, progress: 100, message: "saved", assetId: committed.selectedAssetId });
+      // Registration already committed: late cancellation must not invite a second generation.
+      if (mountedRef.current && activeJobRef.current?.controller === controller) {
+        setJob({ state: "complete", providerId, progress: 100, message: "saved", assetId: committed.selectedAssetId });
+      }
+      return { status: "succeeded", providerId, remoteOutcome: "succeeded", ...committed, providerJobId: result.jobId };
     } catch (error) {
       if (error?.name !== "AbortError" && mountedRef.current && activeJobRef.current?.controller === controller) {
         setJob({ state: "error", providerId, progress: null, message: error?.msg || error?.message || String(error), assetId: "" });
       }
+      if (result) {
+        return { status: "registration_pending", providerId, remoteOutcome: "succeeded", outputs: result.outputs, providerJobId: result.jobId };
+      }
+      // An adapter rejection does not prove that the provider rejected the request.
+      return { status: controller.signal.aborted || error?.name === "AbortError" ? "cancelled" : "unknown", providerId, remoteOutcome: "unknown" };
     } finally {
-      if (activeJobRef.current?.controller === controller) activeJobRef.current = null;
+      signal?.removeEventListener("abort", abort);
+      if (activeJobRef.current?.controller === controller) {
+        activeJobRef.current = null;
+        if (controller.signal.aborted && mountedRef.current && !result) {
+          setJob({ state: "cancelled", providerId, progress: null, message: "cancelled", assetId: "" });
+        }
+      }
     }
   }, [connections, imageUrlRefs, notify, setSelectedLibraryAssetId, setUserAssets]);
 
@@ -172,6 +198,7 @@ export function useGenerationPlugins({ imageUrlRefs, notify, setActiveTool, setM
     disconnectProvider,
     cancelProviderConnect,
     generateProvider,
+    registerOutputs: outputs => commitGenerationOutputs(outputs, { imageUrlRefs, notify, setSelectedLibraryAssetId, setUserAssets }),
     cancelGeneration,
     connectPuter: () => connectProvider("puter"),
     cancelPuterConnect: () => cancelProviderConnect("puter"),
@@ -184,6 +211,7 @@ export function useGenerationPlugins({ imageUrlRefs, notify, setActiveTool, setM
     generateWithComfyUI: (request) => generateProvider("comfyui", request),
     generateWithWebUI: (request) => generateProvider("webui", request),
     job,
+    isRunning: () => activeJobRef.current !== null,
     openGeneratedAsset,
   };
 }

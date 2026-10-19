@@ -26,9 +26,11 @@ async function runTransaction(storeName, mode, operation) {
     return await new Promise((resolve, reject) => {
       const transaction = database.transaction(storeName, mode);
       const request = operation(transaction.objectStore(storeName));
-      request.onsuccess = () => resolve(request.result);
+      // A successful request can still be rolled back before the transaction commits.
+      transaction.oncomplete = () => resolve(request.result);
       request.onerror = () => reject(request.error);
       transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error || new DOMException("Voice library transaction aborted", "AbortError"));
     });
   } finally {
     database.close();

@@ -61,15 +61,20 @@ export function useProjectMigration({ hostSession, getExportContext }) {
     setState(old => ({ ...old, pending: false }));
     await refresh();
   };
-  const perform = async (event, action) => {
-    trusted(event);
-    if (working.current) return;
+  const perform = async (action) => {
+    if (working.current) return { outcome: "blocked", error: "项目迁移正在处理。" };
     working.current = true; setState(old => ({ ...old, busy: true, error: "" }));
-    try { await action(); }
-    catch (error) { setState(old => ({ ...old, error: error.message, pending: Boolean(pending.current) })); }
+    try {
+      await action();
+      return { outcome: "completed" };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "项目迁移操作失败。";
+      setState(old => ({ ...old, error: message, pending: Boolean(pending.current) }));
+      return { outcome: "failed", error: message };
+    }
     finally { remember(); working.current = false; setState(old => ({ ...old, busy: false })); }
   };
-  const start = (event, kind, name) => perform(event, async () => {
+  const startOperation = (kind, name) => perform(async () => {
     if (state.needsReconnect || pending.current || active(state.task?.status)) throw new Error("请先处理当前迁移任务。");
     if (!["export", "import"].includes(kind) || !name.trim()) throw new Error("请输入项目包或新目录名称。");
     let body, path;
@@ -91,7 +96,8 @@ export function useProjectMigration({ hostSession, getExportContext }) {
     setState(old => ({ ...old, kind, name, task: null, pending: true, needsReconnect: false }));
     await sendPending();
   });
-  const control = (event, action) => perform(event, async () => {
+  const start = async (event, kind, name) => { trusted(event); return startOperation(kind, name); };
+  const controlOperation = action => perform(async () => {
     if (action === "recover") {
       const current = operation.current;
       if (!current) throw new Error("没有可恢复的迁移记录。");
@@ -148,6 +154,7 @@ export function useProjectMigration({ hostSession, getExportContext }) {
       body, key: crypto.randomUUID() };
     remember(); setState(old => ({ ...old, pending: true })); await sendPending();
   });
+  const control = async (event, action) => { trusted(event); return controlOperation(action); };
   useEffect(() => {
     const taskId = restored.current?.operation.taskId;
     if (!hostSession || !taskId) return undefined;
@@ -173,5 +180,6 @@ export function useProjectMigration({ hostSession, getExportContext }) {
     timer = setTimeout(poll, 500);
     return () => { disposed = true; clearTimeout(timer); };
   }, [hostSession, state.task?.taskId, state.task?.status]);
-  return { ...state, start, control, inFlight: working.current || (!state.needsReconnect && (Boolean(pending.current) || active(state.task?.status))) };
+  return { ...state, start, control, startAgent: startOperation, controlAgent: controlOperation,
+    inFlight: working.current || (!state.needsReconnect && (Boolean(pending.current) || active(state.task?.status))) };
 }

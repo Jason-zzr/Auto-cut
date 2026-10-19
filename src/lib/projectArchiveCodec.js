@@ -84,6 +84,9 @@ export async function unpackProjectArchive(file, { onProgress } = {}) {
   return {
     payload,
     visualMedia: new Map((payload.media?.visuals || []).map((entry) => [entry.id, { ...entry, blob: getBlob(entry) }])),
+    depthMedia: new Map((payload.media?.depth || []).map((entry) => [entry.path, getBlob(entry)])),
+    visionMedia: new Map((payload.media?.vision || []).map((entry) => [entry.path, getBlob(entry)])),
+    subjectBackgroundMedia: new Map((payload.media?.subjectBackgrounds || []).map((entry) => [entry.path, getBlob(entry)])),
     audioSegmentMedia: new Map((payload.media?.audioSegments || []).map((entry) => [entry.id, { ...entry, blob: getBlob(entry) }])),
     audio: getBlob(payload.media?.audio),
     sourceAudio: getBlob(payload.media?.sourceAudio),

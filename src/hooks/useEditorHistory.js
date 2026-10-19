@@ -10,6 +10,8 @@ import {
 
 const HISTORY_LIMIT = 50;
 const HISTORY_DEBOUNCE_MS = 180;
+const sourceMediaIds = new WeakMap();
+let nextSourceMediaId = 1;
 
 function cloneItems(items = []) {
   return (Array.isArray(items) ? items : []).map((item) => ({ ...item }));
@@ -52,17 +54,21 @@ function createSnapshot(d) {
     musicPeaks: d.musicPeaks,
     musicVolume: d.musicVolume,
     sourceAudioBlob: d.sourceAudioBlob,
+    sourceVoiceColorOriginal: d.sourceVoiceColorOriginal || null,
     sourceAudioUrl: d.sourceAudioUrl,
     sourceAudioName: d.sourceAudioName,
     sourceAudioDuration: d.sourceAudioDuration,
     sourceAudioPeaks: d.sourceAudioPeaks,
     sourceAudioVolume: d.sourceAudioVolume,
+    sourceAudioSpatialEffect: d.sourceAudioSpatialEffect,
+    sourceAudioSpatialAmount: d.sourceAudioSpatialAmount,
     sourceAudioStart: d.sourceAudioStart,
     sourceAudioAssetId: d.sourceAudioAssetId,
     sourceAudioLinked: d.sourceAudioLinked,
     trackVisibility: { ...d.trackVisibility },
     trackLocks: { ...d.trackLocks },
     userAssets: cloneItems(d.userAssets),
+    historyItems: cloneItems(d.historyItems),
     selectedTrack: d.selectedTrack,
     selectedSegmentId: d.selectedSegmentId,
     selectedVisualSegmentId: d.selectedVisualSegmentId,
@@ -84,6 +90,9 @@ function mediaIdentity(item) {
 }
 
 export function createEditorSnapshotSignature(snapshot) {
+  for (const blob of [snapshot.sourceAudioBlob, snapshot.sourceVoiceColorOriginal?.blob]) {
+    if (blob instanceof Blob && !sourceMediaIds.has(blob)) sourceMediaIds.set(blob, nextSourceMediaId++);
+  }
   return JSON.stringify({
     script: snapshot.script,
     ratioId: snapshot.ratioId,
@@ -125,9 +134,13 @@ export function createEditorSnapshotSignature(snapshot) {
     },
     source: {
       present: Boolean(snapshot.sourceAudioBlob),
+      mediaId: sourceMediaIds.get(snapshot.sourceAudioBlob),
+      originalMediaId: sourceMediaIds.get(snapshot.sourceVoiceColorOriginal?.blob),
       name: snapshot.sourceAudioName,
       duration: snapshot.sourceAudioDuration,
       volume: snapshot.sourceAudioVolume,
+      spatialEffect: snapshot.sourceAudioSpatialEffect,
+      spatialAmount: snapshot.sourceAudioSpatialAmount,
       start: snapshot.sourceAudioStart,
       assetId: snapshot.sourceAudioAssetId,
       linked: snapshot.sourceAudioLinked,
@@ -135,6 +148,7 @@ export function createEditorSnapshotSignature(snapshot) {
     trackVisibility: snapshot.trackVisibility,
     trackLocks: snapshot.trackLocks,
     assets: snapshot.userAssets.map(mediaIdentity),
+    voiceHistory: (snapshot.historyItems || []).map(mediaIdentity),
   });
 }
 
@@ -207,18 +221,22 @@ function restoreSnapshot(snapshot, d) {
   d.setMusicVolume(snapshot.musicVolume);
   const sourceAudioUrl = getBlobUrl(snapshot.sourceAudioBlob) || snapshot.sourceAudioUrl;
   d.sourceAudioUrlRef.current = sourceAudioUrl;
+  if (d.sourceVoiceColorOriginalRef) d.sourceVoiceColorOriginalRef.current = snapshot.sourceVoiceColorOriginal || null;
   d.setSourceAudioBlob(snapshot.sourceAudioBlob);
   d.setSourceAudioUrl(sourceAudioUrl);
   d.setSourceAudioName(snapshot.sourceAudioName);
   d.setSourceAudioDuration(snapshot.sourceAudioDuration);
   d.setSourceAudioPeaks(snapshot.sourceAudioPeaks);
   d.setSourceAudioVolume(snapshot.sourceAudioVolume);
+    d.setSourceAudioSpatialEffect?.(snapshot.sourceAudioSpatialEffect || "original");
+    d.setSourceAudioSpatialAmount?.(snapshot.sourceAudioSpatialAmount ?? 1);
   d.setSourceAudioStart(snapshot.sourceAudioStart);
   d.setSourceAudioAssetId(snapshot.sourceAudioAssetId || "");
   d.setSourceAudioLinked(snapshot.sourceAudioLinked !== false);
   d.setTrackVisibility({ ...snapshot.trackVisibility });
   d.setTrackLocks({ ...snapshot.trackLocks });
   d.setUserAssets(userAssets);
+  d.setHistoryItems?.(cloneItems(snapshot.historyItems));
   d.setSelectedTrack(snapshot.selectedTrack);
   d.setSelectedSegmentId(snapshot.selectedSegmentId);
   d.setSelectedVisualSegmentId(snapshot.selectedVisualSegmentId);
@@ -230,11 +248,13 @@ function restoreSnapshot(snapshot, d) {
 }
 
 export function useEditorHistory(d) {
+  const sourceVoiceColorOriginal = d.sourceVoiceColorOriginalRef?.current || null;
   // Playback and selection update the restore position, but do not change the
   // edit itself. Reuse the immutable content snapshot and its signature until
   // actual project state changes instead of cloning/serializing every clip on
   // each clock tick (including the background filmstrip/playback UI renders).
   const contentSnapshot = useMemo(() => createSnapshot({
+    sourceVoiceColorOriginal,
     script: d.script,
     captionSegments: d.captionSegments,
     captionPosition: d.captionPosition,
@@ -276,12 +296,16 @@ export function useEditorHistory(d) {
     sourceAudioPeaks: d.sourceAudioPeaks,
     sourceAudioVolume: d.sourceAudioVolume,
     sourceAudioStart: d.sourceAudioStart,
+    sourceAudioSpatialEffect: d.sourceAudioSpatialEffect,
+    sourceAudioSpatialAmount: d.sourceAudioSpatialAmount,
     sourceAudioAssetId: d.sourceAudioAssetId,
     sourceAudioLinked: d.sourceAudioLinked,
     trackVisibility: d.trackVisibility,
     trackLocks: d.trackLocks,
     userAssets: d.userAssets,
+    historyItems: d.historyItems,
   }), [
+    sourceVoiceColorOriginal,
     d.script, d.captionSegments, d.captionPosition, d.captionPlacement,
     d.captionSize, d.captionStyle, d.captionStylePresetId, d.captionStylePresets,
     d.captionsEnabled, d.visualSegments, d.visualOverlaySegments, d.imageSrc,
@@ -291,8 +315,8 @@ export function useEditorHistory(d) {
     d.musicBlob, d.musicSegments, d.musicStart, d.musicUrl, d.musicName,
     d.musicDuration, d.musicPeaks, d.musicVolume, d.sourceAudioBlob,
     d.sourceAudioUrl, d.sourceAudioName, d.sourceAudioDuration, d.sourceAudioPeaks,
-    d.sourceAudioVolume, d.sourceAudioStart, d.sourceAudioAssetId,
-    d.sourceAudioLinked, d.trackVisibility, d.trackLocks, d.userAssets,
+    d.sourceAudioVolume, d.sourceAudioStart, d.sourceAudioAssetId, d.sourceAudioSpatialEffect, d.sourceAudioSpatialAmount,
+    d.sourceAudioLinked, d.trackVisibility, d.trackLocks, d.userAssets, d.historyItems,
   ]);
   const signature = useMemo(() => createEditorSnapshotSignature(contentSnapshot), [contentSnapshot]);
   const snapshot = {

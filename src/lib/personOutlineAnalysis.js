@@ -1200,17 +1200,18 @@ async function analyzeObjectAnchor({
   previousSubject,
   previousMaskBox,
   reuseTrackedSubject = false,
+  selectedSubject = null,
   signal,
   onProgress,
 }) {
   const segmenterWarmup = prepareObjectSegmenter({ signal });
   let detection = null;
-  let detectedSubject = reuseTrackedSubject && previousSubject && previousMaskBox
+  let detectedSubject = selectedSubject || (reuseTrackedSubject && previousSubject && previousMaskBox
     ? {
         ...previousSubject,
         box: normalizeSubjectBox(previousMaskBox, targetSize.width, targetSize.height),
       }
-    : null;
+    : null);
   if (!detectedSubject) {
     detection = await detectObjectsWithNanoDet({
       blob: frameBlob,
@@ -1258,7 +1259,7 @@ async function analyzeObjectAnchor({
     }
   };
   await runMagicTouch();
-  if (!selected && reuseTrackedSubject) {
+  if (!selected && reuseTrackedSubject && !selectedSubject) {
     onProgress?.({ progress: 68, phase: "跟踪框刷新失败，NanoDet 重新识别实物" });
     detection = await detectObjectsWithNanoDet({
       blob: frameBlob,
@@ -1317,8 +1318,16 @@ export async function analyzeObjectOutlineImage(options = {}) {
     blob,
     signal,
     onProgress,
+    selectedSubject = null,
   } = options;
   if (!(blob instanceof Blob) || !blob.size) throw new TypeError("实物描边需要有效图片。");
+  if (selectedSubject) {
+    const box = selectedSubject.box;
+    if (!box || [box.xmin, box.ymin, box.xmax, box.ymax].some(value => !Number.isFinite(value) || value < 0 || value > 1) ||
+        box.xmax <= box.xmin || box.ymax <= box.ymin || typeof selectedSubject.label !== "string" || !Number.isFinite(selectedSubject.score)) {
+      throw new TypeError("请选择有效的实物目标框。");
+    }
+  }
   throwIfAborted(signal);
   const bitmap = await createImageBitmap(blob);
   const canvas = document.createElement("canvas");
@@ -1335,6 +1344,7 @@ export async function analyzeObjectOutlineImage(options = {}) {
     targetSize,
     previousSubject: null,
     previousMaskBox: null,
+    selectedSubject,
     signal,
     onProgress,
   });
@@ -1386,18 +1396,31 @@ export async function analyzeObjectOutlineImage(options = {}) {
 export async function analyzeObjectOutlineVideo(options = {}) {
   const {
     src,
+    sourceStart = 0,
     duration: requestedDuration,
     maxDimension = 360,
     flowFps = FLOW_FPS,
     anchorFps = 1 / 3.5,
     maxSamples = 360,
+    selectedSubject = null,
     signal,
     onProgress,
     onSample,
   } = options;
   if (!src) throw new TypeError("实物描边分析需要视频源。");
+  if (!Number.isFinite(sourceStart) || sourceStart < 0 || requestedDuration !== undefined && (!Number.isFinite(requestedDuration) || requestedDuration <= 0)) {
+    throw new TypeError("请选择有效的视频源区间。");
+  }
+  if (selectedSubject) {
+    const box = selectedSubject.box;
+    if (!box || [box.xmin, box.ymin, box.xmax, box.ymax].some(value => !Number.isFinite(value) || value < 0 || value > 1) ||
+        box.xmax <= box.xmin || box.ymax <= box.ymin || typeof selectedSubject.label !== "string" || !Number.isFinite(selectedSubject.score)) {
+      throw new TypeError("请选择有效的实物目标框。");
+    }
+  }
+  // The selected box belongs to sourceStart; later anchors use its tracked mask.
+  const selectedTarget = selectedSubject ? { ...selectedSubject, box: { ...selectedSubject.box } } : null;
   throwIfAborted(signal);
-  const flowWarmup = Promise.resolve().then(() => getFlowWorker().ready);
   const objectUrl = src instanceof Blob ? URL.createObjectURL(src) : "";
   const video = document.createElement("video");
   video.crossOrigin = "anonymous";
@@ -1405,17 +1428,26 @@ export async function analyzeObjectOutlineVideo(options = {}) {
   video.playsInline = true;
   video.preload = "auto";
   video.src = objectUrl || String(src);
-  await ensureVideoReady(video, signal);
+  try {
+    await ensureVideoReady(video, signal);
+    if (!Number.isFinite(video.duration) || sourceStart >= video.duration || requestedDuration !== undefined && sourceStart + requestedDuration > video.duration + 0.001) {
+      throw new RangeError("抠像区间超出视频源时长。");
+    }
+  } catch (error) {
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    throw error;
+  }
   const scale = Math.min(1, maxDimension / Math.max(video.videoWidth, video.videoHeight));
   const targetSize = {
     width: Math.max(2, Math.round(video.videoWidth * scale)),
     height: Math.max(2, Math.round(video.videoHeight * scale)),
   };
-  const duration = Math.max(
-    0.05,
-    Math.min(Number(video.duration) || requestedDuration || 0.05, Number(requestedDuration) || video.duration || 0.05),
-  );
-  const sampleTimes = getPersonOutlineSampleTimes(duration, flowFps, maxSamples);
+  const duration = Math.min(video.duration - sourceStart, requestedDuration ?? video.duration - sourceStart);
+  const sampleTimes = getPersonOutlineSampleTimes(duration, flowFps, maxSamples).map(time => Math.min(time, duration));
+  const sourceTimes = sampleTimes.map(time => sourceStart + time);
   const anchorEvery = Math.max(1, Math.round(flowFps / Math.max(0.1, anchorFps)));
   const canvas = document.createElement("canvas");
   canvas.width = targetSize.width;
@@ -1447,15 +1479,15 @@ export async function analyzeObjectOutlineVideo(options = {}) {
   };
   try {
     onProgress?.({ progress: 1, phase: "准备 NanoDet、MagicTouch 与实物光流" });
-    await flowWarmup;
-    sequentialFrameReader = await createSequentialFrameReader(src, sampleTimes, signal);
+    await getFlowWorker().ready;
+    sequentialFrameReader = await createSequentialFrameReader(src, sourceTimes, signal);
     for (let index = 0; index < sampleTimes.length; index += 1) {
       throwIfAborted(signal);
       const time = sampleTimes[index];
       const decodeStartedAt = performance.now();
       const decodedCanvas = sequentialFrameReader ? await sequentialFrameReader.next() : null;
       if (!decodedCanvas) {
-        await seekVideo(video, time, signal);
+        await seekVideo(video, sourceTimes[index], signal);
       }
       context.fillStyle = "#000";
       context.fillRect(0, 0, targetSize.width, targetSize.height);
@@ -1486,6 +1518,7 @@ export async function analyzeObjectOutlineVideo(options = {}) {
           : 0;
         const areaRatio = trackedMaskArea > 0 ? nextArea / trackedMaskArea : 1;
         if (!nextBox || areaRatio < 0.35 || areaRatio > 2.8) {
+          if (selectedTarget) throw new Error("选定实物已丢失，请重新选择目标或缩短片段。");
           currentAlpha = null;
           trackedMaskBox = null;
           trackedMaskArea = 0;
@@ -1510,6 +1543,10 @@ export async function analyzeObjectOutlineVideo(options = {}) {
           previousSubject: trackedSubject,
           previousMaskBox: trackedMaskBox,
           reuseTrackedSubject: index > 0 && Boolean(trackedSubject && trackedMaskBox),
+          selectedSubject: selectedTarget ? index === 0 ? selectedTarget : {
+            ...selectedTarget,
+            box: normalizeSubjectBox(trackedMaskBox, targetSize.width, targetSize.height),
+          } : null,
           signal,
           onProgress: ({ progress, phase }) => onProgress?.({
             progress: Math.max((index / sampleTimes.length) * 100, progress * 0.08),
@@ -1517,6 +1554,9 @@ export async function analyzeObjectOutlineVideo(options = {}) {
           }),
         });
         detections = anchor.detections;
+        if (selectedTarget && (!anchor.alpha || !anchor.box || !anchor.subject)) {
+          throw new Error("无法稳定分割选定实物，请重新选择目标或缩短片段。");
+        }
         trackedSubject = anchor.subject || trackedSubject;
         if (anchor.alpha && anchor.box && anchor.subject) {
           currentAlpha = anchor.alpha;

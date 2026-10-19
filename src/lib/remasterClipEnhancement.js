@@ -1,5 +1,5 @@
 import { encodePngFrameSequence } from "./media.js";
-import { enhanceRemasterFrame } from "./remasterEnhancement.js";
+import { enhanceRemasterFrame, estimateNoise } from "./remasterEnhancement.js";
 
 let aacEncoderRegistered = false;
 
@@ -170,6 +170,7 @@ async function enhanceRemasterClipWebCodecs({ segment, frameRate = 0, maxLongEdg
     const sequenceId = `denoise-sequence-${crypto.randomUUID?.() ?? Date.now()}`;
     let backend = "";
     let reusedFrames = 0;
+    let analysis = null;
     let nextDecoded = iterator.next();
     try {
       await output.start();
@@ -179,6 +180,7 @@ async function enhanceRemasterClipWebCodecs({ segment, frameRate = 0, maxLongEdg
         const decoded = await nextDecoded;
         if (decoded.done || !decoded.value?.canvas) throw new Error(`无法解码第 ${index + 1} 帧`);
         const bitmap = await createImageBitmap(decoded.value.canvas);
+        if (strength === "auto") { analysis = estimateNoise(bitmap); strength = analysis.strength; }
         nextDecoded = iterator.next();
         const result = await enhanceRemasterFrame({
           bitmap,
@@ -230,6 +232,7 @@ async function enhanceRemasterClipWebCodecs({ segment, frameRate = 0, maxLongEdg
       reusedFrames,
       pipeline: "webcodecs-stream",
       audioPreserved: Boolean(audioBuffer),
+      strength, analysis,
     };
   } finally {
     input.dispose();
@@ -258,6 +261,7 @@ async function enhanceRemasterClipLegacy({ segment, videoElement = null, frameRa
   const totalFrames = Math.max(1, Math.ceil(sourceDuration * safeFrameRate));
   let outputSize = null;
   let backend = "";
+  let analysis = null;
   try {
     const blob = await encodePngFrameSequence({
       totalFrames,
@@ -271,6 +275,7 @@ async function enhanceRemasterClipLegacy({ segment, videoElement = null, frameRa
         throwIfAborted(signal);
         await seekVideo(video, sourceStart + index / safeFrameRate, signal);
         const bitmap = await createImageBitmap(video);
+        if (strength === "auto") { analysis = estimateNoise(bitmap); strength = analysis.strength; }
         const result = await enhanceRemasterFrame({
           bitmap,
           maxLongEdge,
@@ -312,6 +317,7 @@ async function enhanceRemasterClipLegacy({ segment, videoElement = null, frameRa
       reusedFrames: 0,
       pipeline: "png-ffmpeg-fallback",
       audioPreserved: segment.blob instanceof Blob,
+      strength, analysis,
     };
   } finally {
     video.pause();

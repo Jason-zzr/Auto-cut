@@ -1,4 +1,5 @@
 import { createChromeBuiltInSession } from "./chromeBuiltInAi.js";
+export const AI_MUSIC_MODEL_REVISION = "0b8a05e0bc3511e674b4cb3413d3ef6c48880cdb";
 
 export const AI_MUSIC_PRESETS = {
   style: [

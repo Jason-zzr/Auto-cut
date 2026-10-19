@@ -139,11 +139,11 @@ export function useMiganRepair({
     });
   };
 
-  const openDialog = () => {
+  const openDialog = ({ resetRegions = false } = {}) => {
     if (!selectedSegment) return;
-    const next = regions.length ? regions : initialRegions(selectedSegment);
+    const next = resetRegions || !regions.length ? initialRegions(selectedSegment) : regions;
     setRegions(next);
-    setActiveRegionId((current) => current || next[0]?.id || "");
+    setActiveRegionId((current) => (!resetRegions && current) || next[0]?.id || "");
     setDialogOpen(true);
   };
 

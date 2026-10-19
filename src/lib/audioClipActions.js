@@ -24,6 +24,18 @@ export function updateAudioSegmentPlaybackRate(segment, value) {
   };
 }
 
+export async function prepareAudioSegmentReverse(segment, reversed, { signal } = {}) {
+  signal?.throwIfAborted();
+  const originalBlob = await loadProjectMediaBlob(segment,
+    segment.originalBlob || segment.projectMedia?.bindings?.originalBlob ? "originalBlob" : "blob", signal);
+  signal?.throwIfAborted();
+  const originalPeaks = segment.originalPeaks || segment.peaks || [];
+  const blob = reversed ? await reverseAudioBlob(originalBlob) : originalBlob;
+  signal?.throwIfAborted();
+  return { blob, peaks: reversed ? [...originalPeaks].reverse() : originalPeaks,
+    reversed, reversing: false, originalBlob, originalPeaks };
+}
+
 export function createAudioClipActions(d) {
   const updateAudioSegment = (id, patch) => d.setAudioSegments((segments) => segments.map((segment) => {
     if (segment.id !== id) return segment;
@@ -50,14 +62,10 @@ export function createAudioClipActions(d) {
     d.audioSegmentRefs.current.get(id)?.pause();
     d.setAudioSegments((items) => items.map((item) => item.id === id ? { ...item, reversing: true } : item));
     try {
-      const originalBlob = await loadProjectMediaBlob(segment,
-        segment.originalBlob || segment.projectMedia?.bindings?.originalBlob ? "originalBlob" : "blob");
-      const originalPeaks = segment.originalPeaks || segment.peaks || [];
-      const blob = segment.reversed ? originalBlob : await reverseAudioBlob(originalBlob);
-      const peaks = segment.reversed ? originalPeaks : [...originalPeaks].reverse(); const url = URL.createObjectURL(blob);
+      const result = await prepareAudioSegmentReverse(segment, !segment.reversed);
+      const url = URL.createObjectURL(result.blob);
       URL.revokeObjectURL(segment.url);
-      d.setAudioSegments((items) => items.map((item) => item.id === id ? { ...item, blob, url, peaks,
-        reversed: !segment.reversed, reversing: false, originalBlob, originalPeaks } : item));
+      d.setAudioSegments((items) => items.map((item) => item.id === id ? { ...item, ...result, url } : item));
       d.notify(segment.reversed ? d.t("audioReverseRestored") : d.t("audioReversed"));
     } catch (error) {
       d.setAudioSegments((items) => items.map((item) => item.id === id ? { ...item, reversing: false } : item));

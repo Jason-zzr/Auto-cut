@@ -1,5 +1,6 @@
 import { MAX_TIMELINE_DURATION_SECONDS, MIN_VISUAL_SEGMENT_SECONDS } from "../config/editor.js";
 import { COLOR_GRADE_KEYFRAME_KEYS, normalizeColorGradeProperty } from "./colorGrade.js";
+import { getVisualSpeedCurveRateAtProgress, getVisualSpeedCurveSourceProgress } from "./visualSpeedCurve.js";
 
 const DEFAULT_TRANSFORM = Object.freeze({ x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 });
 export const VISUAL_TRANSFORM_KEYS = Object.freeze(["scale", "x", "y", "rotation", "opacity"]);
@@ -20,9 +21,7 @@ export function getVisualSourceTime(segment, localTime = 0) {
   const sourceDuration = Math.max(MIN_VISUAL_SEGMENT_SECONDS, Number(segment?.sourceDuration) || duration * normalizeVisualPlaybackRate(segment?.playbackRate));
   if (segment?.speedCurve?.enabled && Array.isArray(segment.speedCurve.points)) {
     const progress = Math.max(0, Math.min(1, Math.max(0, Number(localTime) || 0) / duration));
-    // Imported lazily at module evaluation time through a local helper to keep
-    // the existing visual-effects API as the single source-time entry point.
-    return start + sourceDuration * getCurveSourceProgress(segment.speedCurve, progress);
+    return start + sourceDuration * getVisualSpeedCurveSourceProgress(segment.speedCurve, progress);
   }
   return start + Math.max(0, Number(localTime) || 0) * normalizeVisualPlaybackRate(segment?.playbackRate);
 }
@@ -31,46 +30,7 @@ export function getVisualPlaybackRateAtTime(segment, localTime = 0) {
   if (!segment?.speedCurve?.enabled || !Array.isArray(segment.speedCurve.points)) return normalizeVisualPlaybackRate(segment?.playbackRate);
   const duration = Math.max(MIN_VISUAL_SEGMENT_SECONDS, Number(segment?.duration) || MIN_VISUAL_SEGMENT_SECONDS);
   const progress = Math.max(0, Math.min(1, Math.max(0, Number(localTime) || 0) / duration));
-  const points = segment.speedCurve.points
-    .filter((point) => point && Number.isFinite(Number(point.progress)) && Number.isFinite(Number(point.rate)))
-    .map((point) => ({ progress: Math.max(0, Math.min(1, Number(point.progress))), rate: normalizeVisualPlaybackRate(point.rate) }))
-    .sort((left, right) => left.progress - right.progress);
-  if (points.length < 2) return normalizeVisualPlaybackRate(segment?.playbackRate);
-  const rightIndex = points.findIndex((point) => point.progress >= progress);
-  if (rightIndex <= 0) return points[0].rate;
-  const left = points[rightIndex - 1];
-  const right = points[rightIndex];
-  const local = (progress - left.progress) / Math.max(0.0001, right.progress - left.progress);
-  const eased = segment.speedCurve.smooth === false ? local : local * local * (3 - 2 * local);
-  return normalizeVisualPlaybackRate(left.rate + (right.rate - left.rate) * eased);
-}
-
-function getCurveSourceProgress(curve, progress) {
-  const points = curve.points
-    .filter((point) => point && Number.isFinite(Number(point.progress)) && Number.isFinite(Number(point.rate)))
-    .map((point) => ({ progress: Math.max(0, Math.min(1, Number(point.progress))), rate: normalizeVisualPlaybackRate(point.rate) }))
-    .sort((left, right) => left.progress - right.progress);
-  if (points.length < 2) return progress;
-  points[0].progress = 0;
-  points[points.length - 1].progress = 1;
-  const smooth = curve.smooth !== false;
-  const segmentIntegral = (left, right, local = 1) => {
-    const t = Math.max(0, Math.min(1, local));
-    const easingIntegral = smooth ? t ** 3 - 0.5 * t ** 4 : 0.5 * t ** 2;
-    return (right.progress - left.progress) * (left.rate * t + (right.rate - left.rate) * easingIntegral);
-  };
-  const total = points.slice(0, -1).reduce((sum, point, index) => sum + segmentIntegral(point, points[index + 1]), 0) || 1;
-  let consumed = 0;
-  for (let index = 0; index < points.length - 1; index += 1) {
-    const left = points[index];
-    const right = points[index + 1];
-    if (progress >= right.progress) consumed += segmentIntegral(left, right);
-    else if (progress > left.progress) {
-      consumed += segmentIntegral(left, right, (progress - left.progress) / Math.max(0.0001, right.progress - left.progress));
-      break;
-    } else break;
-  }
-  return Math.max(0, Math.min(1, consumed / total));
+  return getVisualSpeedCurveRateAtProgress(segment.speedCurve, progress);
 }
 
 export function updateVisualSegmentPlaybackRate(segment, value) {

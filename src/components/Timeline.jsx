@@ -208,6 +208,7 @@ function getImageTimelineThumbnailCount({ duration, timelineDuration, contentWid
 }
 
 export function Timeline({
+  agentSelectionRef,
   t,
   timelineMarkers = [],
   setTimelineMarkers,
@@ -1054,6 +1055,26 @@ export function Timeline({
     track,
     getTimelineClipLockKey(track, id),
   );
+  useLayoutEffect(() => {
+    if (!agentSelectionRef) return;
+    const tracks = { visuals: "image", overlays: "overlay", stickers: "sticker", captions: "caption", audio: "audio", source: "source", music: "music" };
+    const controller = {
+      inspect: () => timelineSelectableClips.filter(clip => timelineRangeSelection.has(timelineSelectionKey(clip.track, clip.id)))
+        .map(clip => ({ track: Object.keys(tracks).find(track => tracks[track] === clip.track), clipId: clip.id })),
+      select: items => {
+        const targets = items.map(item => ({ track: tracks[item.track], id: item.clipId }));
+        for (const target of targets) {
+          if (!timelineSelectableClips.some(clip => clip.track === target.track && clip.id === target.id)) throw Object.assign(new Error("CLIP_NOT_FOUND"), { code: "CLIP_NOT_FOUND" });
+          if (!isTimelineClipVisible(target.track, target.id) || isTimelineClipLocked(target.track, target.id)) throw Object.assign(new Error("TRACK_LOCKED"), { code: "TRACK_LOCKED" });
+        }
+        clearClipSelections();
+        setTimelineRangeSelection(new Set(targets.map(target => timelineSelectionKey(target.track, target.id))));
+        if (targets.length) setSelectedTrack(targets.at(-1).track);
+      },
+    };
+    agentSelectionRef.current = controller;
+    return () => { if (agentSelectionRef.current === controller) agentSelectionRef.current = null; };
+  });
   const sourceAudioLaneDropActive = Number.isInteger(sourceAudioDragTargetLane) && sourceAudioDragTargetLane >= 0;
   const showVoiceTrack = audioSegments.length > 0 || draggedAssetType === "audio" || sourceAudioLaneDropActive;
   const audioLanes = useMemo(() => {

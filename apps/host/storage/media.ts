@@ -3,9 +3,11 @@ import { Readable } from "node:stream";
 import { HostError } from "../sessions.ts";
 import type { ProjectFiles } from "./files.ts";
 
-export async function inspectMedia(files: ProjectFiles, path: string, sizeBytes: number, includeDuration = false) {
+export async function inspectMedia(files: ProjectFiles, path: string, sizeBytes: number, includeDuration = false, declaredMimeType = "") {
   const chunks: Buffer[] = [];
-  for await (const chunk of files.stream(path, 0, Math.min(sizeBytes, 64))) chunks.push(chunk);
+  const normalizedMimeType = declaredMimeType.split(";", 1)[0].trim().toLowerCase();
+  const headerSize = normalizedMimeType === "image/svg+xml" ? 4096 : 64;
+  for await (const chunk of files.stream(path, 0, Math.min(sizeBytes, headerSize))) chunks.push(chunk);
   const header = Buffer.concat(chunks);
   const image = (mimeType: string, extension: string) => ({ kind: "image" as const, mimeType, extension, durationSeconds: 0 });
   if (header.length >= 33 && header.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) && header.toString("ascii", 12, 16) === "IHDR") return image("image/png", "png");
@@ -13,6 +15,10 @@ export async function inspectMedia(files: ProjectFiles, path: string, sizeBytes:
   if (header.length >= 13 && ["GIF87a", "GIF89a"].includes(header.toString("ascii", 0, 6))) return image("image/gif", "gif");
   if (header.length >= 16 && header.toString("ascii", 0, 4) === "RIFF" && header.toString("ascii", 8, 12) === "WEBP") return image("image/webp", "webp");
   if (header.length >= 16 && header.toString("ascii", 4, 8) === "ftyp" && ["avif", "avis"].includes(header.toString("ascii", 8, 12))) return image("image/avif", "avif");
+  if (normalizedMimeType === "image/svg+xml") {
+    const source = header.toString("utf8").trimStart();
+    if (source.startsWith("<svg") || source.startsWith("<?xml") && source.includes("<svg")) return image("image/svg+xml", "svg");
+  }
   const streams = new Set<Readable>();
   const source = new CustomSource({ getSize: () => sizeBytes, maxCacheSize: 4 * 1024 * 1024, prefetchProfile: "none",
     read(start, end) {

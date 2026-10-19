@@ -10,8 +10,8 @@ import {
 // Preserve display-frame updates for preview effects and keyframes. The
 // timeline playhead paints independently through useTimelinePlayhead.
 export const PLAYBACK_UI_FRAME_MS = 15;
-export const DEFAULT_VISION_OPTIONS = Object.freeze({ removeBackground: false });
-export const EMPTY_VISION_OPTIONS = Object.freeze({ removeBackground: false });
+export const DEFAULT_VISION_OPTIONS = Object.freeze({ removeBackground: false, avoidCaptions: false });
+export const EMPTY_VISION_OPTIONS = Object.freeze({ removeBackground: false, avoidCaptions: false });
 
 export function shouldCorrectPreviewMediaTime({ isPlaying, currentTime, targetTime, threshold = 0.04 }) {
   return !isPlaying && Number.isFinite(targetTime) && Math.abs((Number(currentTime) || 0) - targetTime) > threshold;
@@ -100,15 +100,19 @@ export async function decodeAvatarAudio16k(blob) {
   } finally { await context.close().catch(() => {}); }
 }
 
-export function runAvatarWorkerTask(worker, message, transfer, terminalType, onProgress) {
+export function runAvatarWorkerTask(worker, message, transfer, terminalType, onProgress, signal) {
   return new Promise((resolve, reject) => {
+    const cleanup = () => { worker.onmessage = null; worker.onerror = null; signal?.removeEventListener("abort", abort); };
+    const abort = () => { cleanup(); worker.terminate(); reject(new DOMException("Canceled", "AbortError")); };
+    if (signal?.aborted) return abort();
+    signal?.addEventListener("abort", abort, { once: true });
     worker.onmessage = (event) => {
       if (event.data?.type === "progress") return void onProgress?.(event.data);
-      if (event.data?.type === "error") return void reject(new Error(event.data.message));
-      if (event.data?.type === terminalType) resolve(event.data);
+      if (event.data?.type === "error") { cleanup(); reject(new Error(event.data.message)); }
+      if (event.data?.type === terminalType) { cleanup(); resolve(event.data); }
     };
-    worker.onerror = (event) => reject(new Error(event.message || "Worker error"));
-    worker.postMessage(message, transfer);
+    worker.onerror = (event) => { cleanup(); reject(new Error(event.message || "Worker error")); };
+    try { worker.postMessage(message, transfer); } catch (error) { cleanup(); reject(error); }
   });
 }
 

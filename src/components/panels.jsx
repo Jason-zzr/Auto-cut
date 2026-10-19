@@ -1444,6 +1444,7 @@ export function ToolPanel(props) {
             setSelectedAudioSegmentId?.("");
             setSelectedTrack?.("");
             setVoiceTab("synthesis");
+            openMobileInspector?.();
             notify("已打开 AI 配音");
           }}
         >

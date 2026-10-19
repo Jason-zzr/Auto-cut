@@ -5,7 +5,7 @@ import { trashSelection } from "../lib/projectTrash.js";
 import { useProjectMigration } from "./useProjectMigration.js";
 import { useMaterialAnalysis } from "./useMaterialAnalysis.js";
 import { useScriptReview } from "./useScriptReview.js";
-import { projectMediaUrl } from "../lib/projectSnapshot.js";
+import { projectMediaUrl, serializeExecutionBasis } from "../lib/projectSnapshot.js";
 
 const PROJECT_BINDING_KEY = "autocut.project-binding";
 
@@ -67,7 +67,7 @@ export function useCompleteProject({ hostSession, captureCompleteProject, prepar
   };
 
   const save = async () => {
-    if (!hostSession || creating.current) return;
+    if (!hostSession || creating.current) return { outcome: "unavailable" };
     const version = ++operationVersion.current;
     creating.current = true;
     setState(previous => ({ ...previous, status: "preparing", error: "" }));
@@ -75,7 +75,10 @@ export function useCompleteProject({ hostSession, captureCompleteProject, prepar
       let current = binding.current;
       if (!current) {
         const name = window.prompt("完整项目名称", "Auto-cut 项目");
-        if (name === null) { setState(previous => ({ ...previous, status: "unbound" })); return; }
+        if (name === null) {
+          setState(previous => ({ ...previous, status: "unbound" }));
+          return { outcome: "cancelled" };
+        }
         const selection = await hostSession.request("/api/v1/file-selections", { purpose: "project-create", multiple: false }, undefined,
           { signal: AbortSignal.timeout(130_000) });
         const project = await hostSession.request("/api/v1/projects", { selectionId: selection.selectionId, name });
@@ -95,21 +98,26 @@ export function useCompleteProject({ hostSession, captureCompleteProject, prepar
       clearTimeout(captureTimer.current); pendingCapture.current = false; observedSignature.current = nextSignature;
       current.queue.retry();
       setState({ ...current.queue.getSnapshot(), name: current.project.name });
+      return { outcome: "queued", projectId: current.project.projectId, name: current.project.name,
+        pending: current.queue.getSnapshot().pending };
     } catch (error) {
       if (version !== operationVersion.current) return;
       const message = error instanceof Error ? error.message : "完整项目保存失败。";
       setState(previous => ({ ...previous, status: "error", error: message }));
       latest.current.notify(message);
+      return { outcome: "failed", error: message };
     } finally { if (version === operationVersion.current) creating.current = false; }
   };
 
   const open = async (resumeProjectId = null) => {
-    if (!hostSession || creating.current) return;
+    if (!hostSession || creating.current) return { outcome: "unavailable" };
     const previous = binding.current;
     if (analysis.running || analysis.unresolved || analysis.pendingSave || migration.inFlight || pendingStorage.current || pendingCapture.current || previous?.queue?.busy() || latest.current.isEditorBusy?.()) {
-      latest.current.notify("请等待当前编辑和保存完成后再打开项目。"); return;
+      const message = "请等待当前编辑和保存完成后再打开项目。";
+      latest.current.notify(message);
+      return { outcome: "blocked", error: message };
     }
-    if (!resumeProjectId && !window.confirm("打开完整项目将替换当前时间线，是否继续？")) return;
+    if (!resumeProjectId && !window.confirm("打开完整项目将替换当前时间线，是否继续？")) return { outcome: "cancelled" };
     const originalSignature = signature(latest.current.captureCompleteProject());
     const version = ++operationVersion.current;
     creating.current = true;
@@ -182,6 +190,7 @@ export function useCompleteProject({ hostSession, captureCompleteProject, prepar
       remember(candidate);
       setState({ ...candidate.queue.getSnapshot(), status: "opened", name: project.name });
       latest.current.notify("完整项目已打开。");
+      return { outcome: "opened", projectId: project.projectId, name: project.name };
     } catch (error) {
       if (candidate?.lease && candidate.lease.editorSessionId !== previous?.lease?.editorSessionId) {
         await hostSession.request(`/api/v1/editor-sessions/${encodeURIComponent(candidate.lease.editorSessionId)}`, undefined, undefined, { method: "DELETE" }).catch(() => {});
@@ -190,17 +199,22 @@ export function useCompleteProject({ hostSession, captureCompleteProject, prepar
       const message = error?.code === "PROJECT_ID_CONFLICT" ? "请先在文件菜单关闭正在编辑的项目副本，再打开所选目录。"
         : error instanceof Error ? error.message : "打开完整项目失败。";
       setState(old => ({ ...old, status: "error", error: message })); latest.current.notify(message);
+      return { outcome: "failed", error: message };
     } finally { if (version === operationVersion.current) creating.current = false; }
   };
 
   const resetProject = async (closeCurrent = false) => {
-    if (creating.current) return;
+    if (creating.current) return { outcome: "unavailable" };
     const current = binding.current;
-    if (closeCurrent && !current) return;
+    if (closeCurrent && !current) return { outcome: "not_open" };
     if (analysis.running || analysis.unresolved || analysis.pendingSave || migration.inFlight || pendingStorage.current || pendingCapture.current || current?.queue?.busy() || latest.current.isEditorBusy?.()) {
-      latest.current.notify(closeCurrent ? "请等待当前编辑和保存完成后再关闭项目。" : "请等待当前编辑和保存完成后再新建项目。"); return;
+      const message = closeCurrent ? "请等待当前编辑和保存完成后再关闭项目。" : "请等待当前编辑和保存完成后再新建项目。";
+      latest.current.notify(message);
+      return { outcome: "blocked", error: message };
     }
-    if (!window.confirm(closeCurrent ? "关闭当前完整项目？已保存的项目文件会保留，当前时间线将清空。" : "新建项目将清空当前时间线，是否继续？")) return;
+    if (!window.confirm(closeCurrent ? "关闭当前完整项目？已保存的项目文件会保留，当前时间线将清空。" : "新建项目将清空当前时间线，是否继续？")) {
+      return { outcome: "cancelled" };
+    }
     const originalSignature = signature(latest.current.captureCompleteProject());
     const version = ++operationVersion.current;
     creating.current = true;
@@ -219,10 +233,12 @@ export function useCompleteProject({ hostSession, captureCompleteProject, prepar
       try { sessionStorage.removeItem(PROJECT_BINDING_KEY); } catch { /* Memory-only mode. */ }
       latest.current.handleNewProject({ confirmed: true, complete: true, ...(closeCurrent ? { closed: true } : {}) });
       setState({ status: "unbound", name: "", pending: 0, lastSaved: null, error: "" });
+      return { outcome: closeCurrent ? "closed" : "new" };
     } catch (error) {
       if (version === operationVersion.current) {
         setState(old => ({ ...old, status: "error", error: error.message })); latest.current.notify(error.message);
       }
+      return { outcome: "failed", error: error instanceof Error ? error.message : "项目操作失败。" };
     } finally { if (version === operationVersion.current) creating.current = false; }
   };
   latest.current.open = open;
@@ -399,6 +415,16 @@ export function useCompleteProject({ hostSession, captureCompleteProject, prepar
   const scriptReview = useScriptReview({ hostSession, getContext: getAnalysisContext });
   const execution = {
     context: getAnalysisContext,
+    async basis(rippleEditing) {
+      await getAnalysisContext();
+      const current = binding.current;
+      if (!current?.queue) throw new Error("请先保存完整项目。");
+      const captured = latest.current.captureCompleteProject();
+      const result = await serializeExecutionBasis(captured, { rippleEditing,
+        registerMedia: (source, name, path) => current.queue.registerMedia(source, name, path, AbortSignal.timeout(300_000)) });
+      if (binding.current !== current) throw new Error("当前项目已切换。");
+      return result;
+    },
     async request(path, body, key) {
       const context = await getAnalysisContext();
       return hostSession.request(`/api/v1/projects/${encodeURIComponent(context.projectId)}/${path}`,

@@ -1,7 +1,9 @@
 import { ArrowCounterClockwise, CheckCircle, CircleNotch, Robot, X } from "@phosphor-icons/react";
+import { useState } from "react";
+import { createTranslator } from "../i18n.js";
 import "./WebMcpReview.css";
 
-const TRACK_LABELS = { visuals: "trackVisuals", overlays: "trackOverlays", audio: "trackAudio", captions: "trackCaptions", stickers: "trackStickers", music: "trackMusic", markers: "trackMarkers" };
+const TRACK_LABELS = { voiceHistory: "history", source: "fieldSourceAudio", assets: "mineTab", visuals: "trackVisuals", overlays: "trackOverlays", audio: "trackAudio", captions: "trackCaptions", stickers: "trackStickers", music: "trackMusic", markers: "trackMarkers" };
 const FIELD_LABELS = {
   name: "fieldName", title: "fieldName", text: "fieldText", script: "fieldText", note: "fieldNote", notes: "fieldNote", description: "fieldNote",
   time: "fieldStart", start: "fieldStart", end: "fieldEnd", rangeEnd: "fieldEnd", endTime: "fieldEnd", duration: "fieldDuration",
@@ -14,14 +16,24 @@ const FIELD_LABELS = {
   reversed: "fieldReverse", reverse: "fieldReverse", position: "fieldPosition", x: "fieldX", y: "fieldY", scale: "fieldScale",
   rotation: "fieldRotation", opacity: "fieldOpacity", baseTransform: "fieldPosition", style: "fieldStyle", styleOverride: "fieldStyle",
   fontSize: "fieldFontSize", captionSize: "fieldFontSize", captionStyle: "fieldStyle", styleOverrides: "fieldStyle",
-  captionStylePresetId: "fieldStyle", captionPlacement: "fieldPosition", placement: "fieldPosition", captionPosition: "fieldPosition",
+  captionStylePresetId: "fieldStyle", captionStylePresets: "captionProjectStyles", captionPlacement: "fieldPosition", placement: "fieldPosition", captionPosition: "fieldPosition",
   positionOverride: "fieldPosition", keyframes: "fieldKeyframes", propertyKeyframes: "fieldKeyframes",
   fontId: "fieldFontId", textColor: "fieldTextColor", backgroundColor: "fieldBackgroundColor", backgroundOpacity: "fieldBackgroundOpacity",
   borderColor: "fieldBorderColor", borderWidth: "fieldBorderWidth", radius: "fieldRadius", paddingX: "fieldPaddingX", paddingY: "fieldPaddingY",
   shadowOpacity: "fieldShadowOpacity", effect: "fieldEffect", textStrokeColor: "fieldTextStrokeColor", textStrokeWidth: "fieldTextStrokeWidth",
+  transition: "transitionSettings", filterId: "visualEffects", mask: "visualMask", inverted: "visualInvertMask",
+  centerX: "visualHorizontal", centerY: "visualVertical", width: "visualWidth", height: "visualHeight", size: "visualDiameter", cornerRadius: "visualCornerRadius", feather: "visualFeather",
+  animation: "visualAnimation", in: "visualAnimationIn", out: "visualAnimationOut",
+  colorGrade: "colorGradeTitle", temperature: "colorGradeTemperature", tint: "colorGradeTint", saturation: "colorGradeSaturation",
+  shadows: "colorGradeShadows", midtones: "colorGradeMidtones", highlights: "colorGradeHighlights", offset: "colorGradeOffset", luminance: "colorGradeLuminance", hue: "colorGradeHue",
+  vectorDesign: "vectorAdvancedTitle", spatialEffect: "audioSpaceTab", spatialAmount: "audioSpaceStrength",
+  sourceAudioVolume: "fieldVolume", sourceAudioSpatialEffect: "audioSpaceTab", sourceAudioSpatialAmount: "audioSpaceStrength",
+  speedCurve: "visualSpeedCurveTitle", rate: "fieldSpeed", smooth: "visualSpeedSmooth",
+  enhancement: "denoiseUseResult",
+  "clickRipple.radius": "clickRippleRadius", meter: "clickRippleMeter", bpm: "clickRippleTempo", rippleDuration: "clickRippleSpreadDuration", interval: "clickRippleInterval",
 };
-const TIME_FIELDS = new Set(["time", "start", "end", "rangeEnd", "endTime", "duration", "sourceStart", "sourceDuration", "fadeIn", "fadeOut"]);
-const SUMMARY_FIELDS = ["type", "text", "note", "notes", "start", "time", "end", "endTime", "duration", "sourceStart", "sourceDuration", "volume", "fadeIn", "fadeOut", "muted", "layer", "lane", "baseTransform", "audioSegmentId", "sourceAudioDisabled", "sourceAudioUnmapped", "color"];
+const TIME_FIELDS = new Set(["time", "start", "end", "rangeEnd", "endTime", "duration", "sourceStart", "sourceDuration", "fadeIn", "fadeOut", "rippleDuration", "interval"]);
+const SUMMARY_FIELDS = ["type", "text", "note", "notes", "start", "time", "end", "endTime", "duration", "sourceStart", "sourceDuration", "volume", "fadeIn", "fadeOut", "muted", "layer", "lane", "baseTransform", "audioSegmentId", "sourceAudioDisabled", "sourceAudioUnmapped", "color", "keyframes", "transition", "filterId", "mask", "animation", "colorGrade", "spatialEffect", "spatialAmount", "subjectEffect", "clickRipple", "vectorDesign"];
 // Raw media and runtime metadata must never reach a review value. Text, names,
 // and marker notes are deliberately rendered as React text, never as markup.
 const PRIVATE_FIELDS = /^(?:blob|src|url|file|path|archivePath|integrity|archiveMediaId|assetId|originalAssetId|thumbnail.*|poster.*|waveform.*|media.*|cache.*|.*token|.*credential|.*secret)$/i;
@@ -58,17 +70,25 @@ function ReviewValue({ value, field, t, time, number, depth = 0 }) {
     if (TIME_FIELDS.has(field)) return time(value);
     if (field === "lane") return number(value + 1);
     if (field === "volume" || field === "opacity") return `${number(value * 100)}%`;
-    if (field === "playbackRate") return `${number(value)}×`;
+    if (field === "playbackRate" || field === "rate") return `${number(value)}×`;
+    if (field === "progress") return `${number(value * 100)}%`;
     return number(value);
   }
   if (typeof value === "string") return ENUM_LABELS[field]?.[value] ? t(ENUM_LABELS[field][value]) : value;
-  // Compact summaries keep large keyframe/word arrays and nested metadata out
-  // of the panel while making the affected property and item count explicit.
+  if (["subjectEffect", "vectorDesign"].includes(field) && typeof value === "object") return <details>
+    <summary>{t("valueProperties", { count: Object.keys(value).length })}</summary>
+    <ReviewValue value={value} field="effectSettings" t={t} time={time} number={number} />
+  </details>;
+  if (["keyframes", "captionStylePresets", "points"].includes(field) && Array.isArray(value)) return <details>
+    <summary>{t("valueItems", { count: value.length })}</summary>
+    <span className="webmcp-review-object">{value.map((frame, index) => <ReviewValue key={index} value={frame} field={field === "keyframes" ? "keyframe" : field === "points" ? "speedPoint" : "captionPreset"} t={t} time={time} number={number} />)}</span>
+  </details>;
+  // Other arrays summarize metadata; keyframes expose every reviewed property.
   if (Array.isArray(value)) return t("valueItems", { count: value.length });
   if (typeof value === "object") {
     const entries = Object.entries(value).filter(([key]) => !PRIVATE_FIELDS.test(key));
-    if (depth >= 2 || entries.length > 12) return t("valueProperties", { count: entries.length });
-    return <span className="webmcp-review-object">{entries.map(([key, entry]) => <span key={key}><span className="webmcp-review-object-label">{t(FIELD_LABELS[key] || TRACK_LABELS[key] || "fieldOther", { field: key })}: </span><ReviewValue value={entry} field={key} t={t} time={time} number={number} depth={depth + 1} /></span>)}</span>;
+    if (!["keyframe", "effectSettings", "captionPreset", "style"].includes(field) && (depth >= 2 || entries.length > 12)) return t("valueProperties", { count: entries.length });
+    return <span className="webmcp-review-object">{entries.map(([key, entry]) => <span key={key}><span className="webmcp-review-object-label">{t(FIELD_LABELS[`${field}.${key}`] || FIELD_LABELS[key] || TRACK_LABELS[key] || "fieldOther", { field: key })}: </span><ReviewValue value={entry} field={key} t={t} time={time} number={number} depth={depth + 1} /></span>)}</span>;
   }
   return t("valueEmpty");
 }
@@ -101,7 +121,12 @@ function EntityChange({ id, before, after, fields, status, t, time, number }) {
 }
 
 export function WebMcpReview({ agent, language }) {
-  const { t, view, working, error, stale } = agent;
+  const { view, working, error, stale } = agent;
+  const editorT = createTranslator(language);
+  const t = (key, values) => {
+    const value = agent.t(key, values);
+    return value === key ? editorT(key, values) : value;
+  };
   if (!view) return null;
   const applied = view.status === "applied";
   const preview = view.preview;
@@ -138,6 +163,7 @@ export function WebMcpReview({ agent, language }) {
           {applied ? <CheckCircle size={16} aria-hidden="true" /> : null}{t(applied ? "applied" : "pending")}
         </p>
         {view.summary ? <p className="webmcp-review-summary">{view.summary}</p> : null}
+        {(preview.warnings || []).map((warning, index) => <p className="webmcp-review-status" key={index}>{t(warning.code, warning)}</p>)}
         {Number.isFinite(preview.beforeDuration) && Number.isFinite(preview.afterDuration) ? <p className="webmcp-review-duration">{t("duration", { before: time(preview.beforeDuration), after: time(preview.afterDuration) })}</p> : null}
         {changedRows.length ? <section className="webmcp-review-section">
           <h3>{t("trackVisuals")}</h3>
@@ -190,21 +216,60 @@ export function WebMcpReview({ agent, language }) {
   );
 }
 
-export function WebMcpAiStatus({ agent }) {
+export function VisualCandidatePicker({ agent, job, language, actionLabel }) {
+  const [selected, setSelected] = useState(null);
+  const [output, setOutput] = useState("image");
+  const [allowDownload, setAllowDownload] = useState(false);
+  const zh = language?.startsWith("zh");
+  const candidates = job.result?.candidates || [];
+  const preview = agent.detectionPreview?.jobId === job.jobId ? agent.detectionPreview : null;
+  if (!preview) return <p>{zh ? "检测帧已失效，请重新检测当前素材。" : "Detection frame is unavailable. Detect the current source again."}</p>;
+  return <section aria-label={zh ? "选择抠像对象" : "Choose cutout subject"}>
+    <div style={{ position: "relative", lineHeight: 0 }}>
+      <img src={preview.url} alt={zh ? "检测帧" : "Detection frame"} style={{ display: "block", width: "100%" }} />
+      {candidates.map(candidate => <button key={candidate.candidateIndex} type="button"
+        aria-label={`${candidate.candidateIndex + 1}: ${candidate.label}`} aria-pressed={selected === candidate.candidateIndex}
+        onClick={() => setSelected(candidate.candidateIndex)} disabled={agent.working}
+        style={{ position: "absolute", left: `${candidate.box.xmin * 100}%`, top: `${candidate.box.ymin * 100}%`,
+          width: `${(candidate.box.xmax - candidate.box.xmin) * 100}%`, height: `${(candidate.box.ymax - candidate.box.ymin) * 100}%`,
+          border: `3px solid ${selected === candidate.candidateIndex ? "#22c55e" : "#fbbf24"}`, background: "transparent", padding: 0 }}>
+        <span style={{ background: "#111", color: "white", lineHeight: "1.5", position: "absolute", top: 0, left: 0 }}>{candidate.candidateIndex + 1}</span>
+      </button>)}
+    </div>
+    <label>{zh ? "目标" : "Subject"}<select value={selected ?? ""} disabled={agent.working} onChange={event => setSelected(event.target.value === "" ? null : Number(event.target.value))}>
+      <option value="">{zh ? "选择一个对象" : "Select a subject"}</option>
+      {candidates.map(candidate => <option key={candidate.candidateIndex} value={candidate.candidateIndex}>{candidate.candidateIndex + 1}: {candidate.label} · {Math.round(candidate.score * 100)}%</option>)}
+    </select></label>
+    {job.result?.sourceType === "video" ? <label>{zh ? "输出" : "Output"}
+      <select value={output} disabled={agent.working} onChange={event => setOutput(event.target.value)}>
+        <option value="image">{zh ? "当前帧透明图片" : "Transparent image of this frame"}</option>
+        <option value="video">{zh ? `从当前帧（${job.result.sourceTime}s）到结尾的透明视频` : `Transparent video from this frame (${job.result.sourceTime}s) to the end`}</option>
+      </select></label> : null}
+    {!candidates.length ? <p>{zh ? "未检测到对象。" : "No objects detected."}</p> : null}
+    <label><input type="checkbox" checked={allowDownload} onChange={event => setAllowDownload(event.target.checked)} disabled={agent.working} />
+      {zh ? "允许按需下载分割组件" : "Allow missing segmentation components to download"}</label>
+    <button type="button" className="panel-secondary" disabled={selected === null || !allowDownload || agent.working}
+      onClick={event => agent.cutoutCandidate(event, job.jobId, selected, allowDownload, output)}>{actionLabel || (zh ? "抠出所选对象" : "Cut out selected subject")}</button>
+  </section>;
+}
+
+export function WebMcpAiStatus({ agent, language }) {
   const { aiJob: job, t } = agent;
   if (!job) return null;
   const running = ["queued", "running"].includes(job.status);
   return <aside className="webmcp-ai-status" aria-label={t("aiJobTitle")}>
-    <header><Robot size={18} aria-hidden="true" /><strong>{t(job.kind === "voiceover" ? "aiVoiceover" : "aiTranscription")}</strong>
+    <header><Robot size={18} aria-hidden="true" /><strong>{job.kind === "audio_reverse" ? (language?.startsWith("zh") ? "音频倒放／恢复" : "Audio reverse / restore") : job.kind === "avatar" ? "JoyVASA / LivePortrait" : job.kind === "auto_caption" ? (language?.startsWith("zh") ? "画面配文" : "Visual captions") : job.kind === "depth_map" ? "Depth Anything V2" : job.kind === "nanovsr" ? "NanoVSR" : job.kind === "visual_repair" ? "MI-GAN" : job.kind === "visual_detect" ? "NanoDet" : job.kind === "visual_cutout" ? "MagicTouch / SlimSAM" : job.kind === "denoise" ? "Remaster DRUNet" : job.kind === "separation" ? createTranslator(language)("vocalSeparationTitle") : job.kind === "music" ? "Stable Audio 3 Small" : t(job.kind === "voiceover" ? "aiVoiceover" : "aiTranscription")}</strong>
       {!running ? <button type="button" className="webmcp-review-close" aria-label={t("aiDismiss")} onClick={agent.dismissAi}><X size={17} /></button> : null}
     </header>
     <div className="webmcp-ai-progress" role="status" aria-live="polite">
       {running ? <CircleNotch size={16} className="webmcp-review-spinner" aria-hidden="true" />
         : job.status === "succeeded" ? <CheckCircle size={16} aria-hidden="true" /> : <X size={16} aria-hidden="true" />}
-      <span>{t(job.cancelRequested && running ? "aiCancelRequested" : job.phaseKey)}{job.segment && running ? ` · ${job.segment.current}/${job.segment.total}` : ""}</span>
+      <span>{job.status === "queued" && !job.cancelRequested && job.waitReason ? job.waitReason : t(job.cancelRequested && running ? "aiCancelRequested" : job.phaseKey)}{job.segment && running ? ` · ${job.segment.current}/${job.segment.total}` : ""}</span>
       <span>{Number.isFinite(job.progress) ? `${job.progress}%` : ""}</span>
       {running ? <progress aria-label={t("aiJobTitle")} max={100} {...(Number.isFinite(job.progress) ? { value: job.progress } : {})} /> : null}
     </div>
     {running ? <button type="button" className="panel-secondary" onClick={agent.cancelAi} disabled={job.cancelRequested}>{t("aiCancel")}</button> : null}
+    {job.kind === "visual_detect" && job.status === "succeeded" ? <VisualCandidatePicker key={job.jobId} agent={agent} job={job} language={language} /> : null}
+    {agent.error ? <p role="alert">{agent.error}</p> : null}
   </aside>;
 }

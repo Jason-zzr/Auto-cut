@@ -1,6 +1,10 @@
 // Keep import progress copy explicit in every supported interface language.
 export const PROJECT_IMPORT_COPY = {
   zh: {
+    selectTitle: "选择便携工程文件",
+    selectHint: "选择一个 .timeline 工程包后，应用会验证并恢复其中的时间线与媒体。",
+    selectButton: "选择 .timeline 文件",
+    cancelButton: "取消",
     title: "正在导入工程",
     archive: "正在读取工程文件",
     visuals: "正在恢复画面素材",
@@ -12,6 +16,10 @@ export const PROJECT_IMPORT_COPY = {
     count: "已准备 {completed} / {total} 项",
   },
   en: {
+    selectTitle: "Choose a portable project file",
+    selectHint: "Choose a .timeline package to validate and restore its timeline and media.",
+    selectButton: "Choose .timeline file",
+    cancelButton: "Cancel",
     title: "Importing project",
     archive: "Reading the project file",
     visuals: "Restoring visual media",
@@ -23,6 +31,10 @@ export const PROJECT_IMPORT_COPY = {
     count: "{completed} of {total} prepared",
   },
   ja: {
+    selectTitle: "ポータブルプロジェクトを選択",
+    selectHint: ".timeline パッケージを選択すると、タイムラインとメディアを検証して復元します。",
+    selectButton: ".timeline ファイルを選択",
+    cancelButton: "キャンセル",
     title: "プロジェクトを読み込み中",
     archive: "プロジェクトファイルを読み込み中",
     visuals: "映像素材を復元中",
@@ -34,6 +46,10 @@ export const PROJECT_IMPORT_COPY = {
     count: "{total} 件中 {completed} 件を準備済み",
   },
   ko: {
+    selectTitle: "휴대용 프로젝트 파일 선택",
+    selectHint: ".timeline 패키지를 선택하면 타임라인과 미디어를 검증하고 복원합니다.",
+    selectButton: ".timeline 파일 선택",
+    cancelButton: "취소",
     title: "프로젝트 가져오는 중",
     archive: "프로젝트 파일 읽는 중",
     visuals: "영상 및 이미지 복원 중",
@@ -45,6 +61,10 @@ export const PROJECT_IMPORT_COPY = {
     count: "{total}개 중 {completed}개 준비됨",
   },
   es: {
+    selectTitle: "Elegir un proyecto portátil",
+    selectHint: "Elige un paquete .timeline para validar y restaurar su línea de tiempo y contenido.",
+    selectButton: "Elegir archivo .timeline",
+    cancelButton: "Cancelar",
     title: "Importando proyecto",
     archive: "Leyendo el archivo del proyecto",
     visuals: "Restaurando imágenes y vídeos",
@@ -56,6 +76,10 @@ export const PROJECT_IMPORT_COPY = {
     count: "{completed} de {total} preparados",
   },
   fr: {
+    selectTitle: "Choisir un projet portable",
+    selectHint: "Choisissez un package .timeline pour valider et restaurer son montage et ses médias.",
+    selectButton: "Choisir un fichier .timeline",
+    cancelButton: "Annuler",
     title: "Importation du projet",
     archive: "Lecture du fichier de projet",
     visuals: "Restauration des images et vidéos",
@@ -67,6 +91,10 @@ export const PROJECT_IMPORT_COPY = {
     count: "{completed} sur {total} prêts",
   },
   de: {
+    selectTitle: "Portable Projektdatei auswählen",
+    selectHint: "Wähle ein .timeline-Paket aus, um Timeline und Medien zu prüfen und wiederherzustellen.",
+    selectButton: ".timeline-Datei auswählen",
+    cancelButton: "Abbrechen",
     title: "Projekt wird importiert",
     archive: "Projektdatei wird gelesen",
     visuals: "Bilder und Videos werden wiederhergestellt",
@@ -78,6 +106,10 @@ export const PROJECT_IMPORT_COPY = {
     count: "{completed} von {total} vorbereitet",
   },
   pt: {
+    selectTitle: "Escolher projeto portátil",
+    selectHint: "Escolha um pacote .timeline para validar e restaurar a linha do tempo e a mídia.",
+    selectButton: "Escolher arquivo .timeline",
+    cancelButton: "Cancelar",
     title: "Importando projeto",
     archive: "Lendo o arquivo do projeto",
     visuals: "Restaurando imagens e vídeos",
@@ -89,6 +121,10 @@ export const PROJECT_IMPORT_COPY = {
     count: "{completed} de {total} preparados",
   },
   th: {
+    selectTitle: "เลือกไฟล์โปรเจกต์แบบพกพา",
+    selectHint: "เลือกแพ็กเกจ .timeline เพื่อตรวจสอบและกู้คืนไทม์ไลน์กับสื่อ",
+    selectButton: "เลือกไฟล์ .timeline",
+    cancelButton: "ยกเลิก",
     title: "กำลังนำเข้าโปรเจกต์",
     archive: "กำลังอ่านไฟล์โปรเจกต์",
     visuals: "กำลังกู้คืนภาพและวิดีโอ",
@@ -100,6 +136,10 @@ export const PROJECT_IMPORT_COPY = {
     count: "เตรียมแล้ว {completed} จาก {total} รายการ",
   },
   vi: {
+    selectTitle: "Chọn tệp dự án di động",
+    selectHint: "Chọn gói .timeline để kiểm tra và khôi phục dòng thời gian cùng nội dung.",
+    selectButton: "Chọn tệp .timeline",
+    cancelButton: "Hủy",
     title: "Đang nhập dự án",
     archive: "Đang đọc tệp dự án",
     visuals: "Đang khôi phục hình ảnh và video",
@@ -111,6 +151,10 @@ export const PROJECT_IMPORT_COPY = {
     count: "Đã chuẩn bị {completed} / {total}",
   },
   ru: {
+    selectTitle: "Выбрать переносимый проект",
+    selectHint: "Выберите пакет .timeline, чтобы проверить и восстановить таймлайн и медиафайлы.",
+    selectButton: "Выбрать файл .timeline",
+    cancelButton: "Отмена",
     title: "Импорт проекта",
     archive: "Чтение файла проекта",
     visuals: "Восстановление изображений и видео",
@@ -122,6 +166,10 @@ export const PROJECT_IMPORT_COPY = {
     count: "Подготовлено: {completed} из {total}",
   },
   it: {
+    selectTitle: "Scegli un progetto portatile",
+    selectHint: "Scegli un pacchetto .timeline per verificare e ripristinare timeline e contenuti multimediali.",
+    selectButton: "Scegli file .timeline",
+    cancelButton: "Annulla",
     title: "Importazione del progetto",
     archive: "Lettura del file di progetto",
     visuals: "Ripristino di immagini e video",
@@ -133,6 +181,10 @@ export const PROJECT_IMPORT_COPY = {
     count: "{completed} di {total} pronti",
   },
   id: {
+    selectTitle: "Pilih file proyek portabel",
+    selectHint: "Pilih paket .timeline untuk memvalidasi dan memulihkan timeline beserta medianya.",
+    selectButton: "Pilih file .timeline",
+    cancelButton: "Batal",
     title: "Mengimpor proyek",
     archive: "Membaca file proyek",
     visuals: "Memulihkan gambar dan video",

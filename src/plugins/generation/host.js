@@ -150,7 +150,12 @@ export async function commitGenerationOutputs(outputs, {
   }
   setUserAssets((items) => [...assets.slice().reverse(), ...items]);
   const selectedId = assets.at(-1)?.id || "";
-  if (selectedId) setSelectedLibraryAssetId(selectedId);
-  notify?.("生成结果已加入 My assets");
-  return { assetIds: assets.map((asset) => asset.id), selectedAssetId: selectedId };
+  // Presentation failure cannot turn an already registered batch into a retryable failure.
+  try {
+    if (selectedId) setSelectedLibraryAssetId(selectedId);
+    notify?.("生成结果已加入 My assets");
+  } catch {
+    console.warn("[Generation] Assets registered; selection or notification could not be updated.");
+  }
+  return { assetIds: assets.map((asset) => asset.id), selectedAssetId: selectedId, assets };
 }

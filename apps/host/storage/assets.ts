@@ -49,7 +49,7 @@ export async function receiveAsset(files: ProjectFiles, projectId: string, key: 
     catch { /* Cleanup failure must not invalidate the already accepted import. */ }
     return previous;
   }
-  const inspected = await inspectMedia(files, stagingPath, size);
+  const inspected = await inspectMedia(files, stagingPath, size, false, metadata.mimeType);
   const assetId = randomUUID(), blobId = randomUUID();
   const media = objectRecord.parse({ kind: "media", entityId: assetId, blobId,
     path: `media/${encodeId(assetId)}/${encodeId(blobId)}.${inspected.extension}`, sizeBytes: size, sha256: digest });

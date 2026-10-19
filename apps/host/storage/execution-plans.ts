@@ -5,11 +5,12 @@ import { emptyRoots, encodeId, normalizedBytes, objectReference, referenceKey, s
 import { writeObject } from "./objects.ts";
 import { readScriptObject, validateScriptSources } from "./scripts.ts";
 import { scriptRecord, scriptRef } from "./script-records.ts";
+import { validateGenerationRequest } from "../../../src/plugins/generation/contract.js";
 
 const id = z.string().min(1).max(256), revision = z.number().int().positive().safe();
 const operation = z.record(z.string(), z.json());
 export const executionStep = z.strictObject({ stepId: id, dependsOn: z.array(id).max(100),
-  kind: z.enum(["edit", "voiceover", "transcription"]),
+  kind: z.enum(["edit", "pause_detect", "audio_reverse", "source_audio_extract", "smart_frame", "caption_avoidance", "visual_detect", "visual_cutout", "visual_repair", "nanovsr", "depth_map", "auto_caption", "avatar", "voiceover", "voice_clone_preview", "voice_convert", "transcription", "music", "separation", "denoise", "plugin"]),
   operations: z.array(operation).max(500), request: operation.nullable() });
 export const executionContent = z.strictObject({ intent: z.string().min(1).max(2000), stateToken: id, editorDigest: z.string().length(64),
   scriptRef: scriptRef.nullable(), inputRefs: z.array(objectReference).max(2000),
@@ -17,10 +18,24 @@ export const executionContent = z.strictObject({ intent: z.string().min(1).max(2
     sourceStartSeconds: z.number().nonnegative(), sourceEndSeconds: z.number().nonnegative(),
     timelineStartSeconds: z.number().nonnegative(), timelineEndSeconds: z.number().nonnegative() })).max(1000),
   steps: z.array(executionStep).min(1).max(100), modelBasis: z.array(operation).max(100), allowModelDownload: z.boolean() });
+const coordinate = z.number().min(0).max(1);
+const detectionResult = z.strictObject({ delivery: z.literal("candidate-boxes"), assetId: id, sourceTime: z.number().nonnegative(),
+  sourceType: z.enum(["image", "video"]).optional(),
+  frameRef: z.strictObject({ kind: z.literal("media"), entityId: id, blobId: id }).optional(),
+  sourceSize: z.strictObject({ width: z.number().int().positive(), height: z.number().int().positive() }),
+  modelId: id, modelPath: z.string().min(1).max(1000), coordinates: z.literal("normalized-source-frame"),
+  candidates: z.array(z.strictObject({ candidateIndex: z.number().int().min(0).max(23), label: id, score: coordinate,
+    box: z.strictObject({ xmin: coordinate, ymin: coordinate, xmax: coordinate, ymax: coordinate }) })).max(24),
+  automaticTargetSelection: z.literal(false), timelineInserted: z.literal(false) });
+const pauseResult = z.strictObject({ delivery: z.literal("pause-candidates"), assetId: id, clipId: id,
+  clipDuration: z.number().positive().max(86400), modelSha256: z.string().length(64),
+  coordinates: z.literal("clip-local-timeline-seconds"), minimum: z.number().min(0.5).max(5), keep: z.number().min(0.3).max(1),
+  candidates: z.array(z.strictObject({ id, start: z.number().nonnegative(), end: z.number().positive(), enabled: z.boolean() })).max(172800),
+  timelineInserted: z.literal(false) });
 const attempt = z.strictObject({ attemptId: id, stepId: id,
   status: z.enum(["running", "succeeded", "failed", "cancel_requested", "cancelled", "interrupted", "remote_status_unknown", "registration_pending"]),
   startedAt: z.iso.datetime(), finishedAt: z.iso.datetime().nullable(),
-  operations: z.array(operation).max(500), resultRefs: z.array(objectReference).max(1000), error: z.string().max(2000).nullable() });
+  operations: z.array(operation).max(500), resultRefs: z.array(objectReference).max(1000), detectionResult: detectionResult.optional(), pauseResult: pauseResult.optional(), error: z.string().max(2000).nullable() });
 const planRef = z.strictObject({ kind: z.literal("plan"), entityId: id, revision });
 export const executionRecord = z.strictObject({ schemaVersion: z.literal(1), format: z.literal("execution-plan"),
   projectId: id, planId: id, revision, previousRef: planRef.nullable(), content: executionContent,
@@ -53,6 +68,19 @@ export function validateExecutionContent(content: ExecutionContent) {
     if (step.kind === "edit" ? !step.operations.length || step.request !== null :
       step.operations.length !== 0 || step.request?.kind !== step.kind) {
       throw new HostError("INVALID_ARGUMENT", 400, "Step parameters do not match its capability.");
+    }
+    if (step.kind === "plugin") {
+      try { validateGenerationRequest(step.request); }
+      catch { throw new HostError("INVALID_ARGUMENT", 400, "Invalid plugin generation request."); }
+    }
+    if (step.kind === "voice_clone_preview" && (!step.request?.assetId || step.request.recordingId !== undefined)) {
+      throw new HostError("INVALID_ARGUMENT", 400, "Durable clone auditions require a registered audio asset; session recordings are supported by direct page jobs.");
+    }
+    if (step.kind === "voice_convert" && step.request?.referenceRecordingId !== undefined) {
+      throw new HostError("INVALID_ARGUMENT", 400, "Durable voice conversion requires a saved profile or registered reference audio asset.");
+    }
+    if (step.kind === "visual_cutout" && (!step.request?.assetId || !step.request.target || step.request.detectionJobId !== undefined || step.request.candidateIndex !== undefined)) {
+      throw new HostError("INVALID_ARGUMENT", 400, "Durable cutouts require a registered image and explicit target; page detection jobs cannot be resumed after reload.");
     }
   };
   content.steps.forEach(step => visit(step.stepId));

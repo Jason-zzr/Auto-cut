@@ -125,6 +125,32 @@ function VisualOverlayMedia({ overlay, src, style, isPlaying, localTime }) {
   </>;
 }
 
+function SubjectBackgroundMedia({ background, isPlaying, localTime = 0 }) {
+  const videoRef = useRef(null);
+  const src = background?.src || "";
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || background?.mode !== "video") return undefined;
+    const sync = () => {
+      const duration = Number(video.duration);
+      const expectedTime = duration > 0 ? Math.max(0, Number(localTime) || 0) % duration : 0;
+      if (Number.isFinite(duration) && Math.abs((video.currentTime || 0) - expectedTime) > (isPlaying ? 0.12 : 0.001)) {
+        video.currentTime = Math.min(expectedTime, Math.max(0, duration - 0.01));
+      }
+      if (isPlaying) requestTimelineMediaPlay(video);
+      else video.pause();
+    };
+    video.addEventListener("loadedmetadata", sync);
+    sync();
+    return () => video.removeEventListener("loadedmetadata", sync);
+  }, [background?.mode, isPlaying, localTime, src]);
+  if (!src || !["image", "video"].includes(background?.mode)) return null;
+  const style = { objectFit: background.fit || "cover", opacity: background.opacity };
+  return background.mode === "video"
+    ? <video ref={videoRef} src={src} crossOrigin="anonymous" muted loop playsInline preload="metadata" style={style} />
+    : <img src={src} alt="" crossOrigin="anonymous" draggable={false} style={style} />;
+}
+
 export function PreviewStage({
   t,
   previewShellRef,
@@ -680,7 +706,9 @@ export function PreviewStage({
                     ? { background: normalizedSubjectEffect.background.color, opacity: normalizedSubjectEffect.background.opacity }
                     : undefined}
                 >
-                  {normalizedSubjectEffect.background.visible !== false && normalizedSubjectEffect.background.mode === "blur" ? (
+                  {normalizedSubjectEffect.background.visible !== false && ["image", "video"].includes(normalizedSubjectEffect.background.mode) ? (
+                    <SubjectBackgroundMedia background={normalizedSubjectEffect.background} isPlaying={isPlaying} localTime={visualLocalTime} />
+                  ) : normalizedSubjectEffect.background.visible !== false && normalizedSubjectEffect.background.mode === "blur" ? (
                     previewVisualType === "video"
                       ? <video src={previewVisualSrc} muted playsInline autoPlay={isPlaying} style={{ objectFit: "cover", filter: `blur(${normalizedSubjectEffect.background.blur}px) brightness(${1 - normalizedSubjectEffect.background.darken})`, transform: "scale(1.1)" }} />
                       : <img src={previewVisualSrc} alt="" style={{ objectFit: "cover", filter: `blur(${normalizedSubjectEffect.background.blur}px) brightness(${1 - normalizedSubjectEffect.background.darken})`, transform: "scale(1.1)" }} />
@@ -890,6 +918,13 @@ export function PreviewStage({
                           opacity: overlaySubjectEffect.background.opacity,
                         }}
                       />
+                    : null}
+                  {overlaySubjectActive
+                    && overlaySubjectEffect.background.visible !== false
+                    && ["image", "video"].includes(overlaySubjectEffect.background.mode)
+                    ? <span className="visual-overlay-subject-background">
+                        <SubjectBackgroundMedia background={overlaySubjectEffect.background} isPlaying={isPlaying} localTime={localTime} />
+                      </span>
                     : null}
                   {showOverlayOriginal ? <VisualOverlayMedia overlay={overlay} src={overlayRenderSrc} style={mediaStyle} isPlaying={isPlaying} localTime={localTime} /> : null}
                   {overlaySubjectActive

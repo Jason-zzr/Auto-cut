@@ -4,6 +4,7 @@ import {
   resolveCaptionFontFamily,
   resolveCaptionFontWeight,
 } from "./captionFonts.js";
+import { getCaptionAvoidancePlacement } from "./visualGeometry.js";
 
 const CAPTION_FONT_WEIGHT = 700;
 const CAPTION_LINE_HEIGHT = 1.35;
@@ -248,6 +249,45 @@ function normalizePlacement(placement) {
 
 export function resolveCaptionSegmentPlacement(segment, fallbackPlacement = "bottom") {
   return segment?.placement ?? fallbackPlacement;
+}
+
+export function resolveCaptionAvoidance({
+  vision,
+  frameSize,
+  sourceSize = vision?.sourceSize,
+  fitMode = "contain",
+  smartCrop = null,
+  basePlacement = "bottom",
+  text = "",
+  captionSize = 14,
+  captionStyle = {},
+  referenceFrame = frameSize,
+  previousPlacement = null,
+} = {}) {
+  if (!vision?.options?.avoidCaptions || !vision?.subject?.box) {
+    return { active: false, placement: basePlacement };
+  }
+  const layout = getCaptionTextLayout({
+    text,
+    captionSize,
+    captionStyle,
+    referenceFrame,
+    renderFrame: frameSize,
+  });
+  const placement = getCaptionAvoidancePlacement(vision.subject.box, {
+    frameSize,
+    sourceSize,
+    fitMode,
+    smartCrop,
+    basePlacement,
+    previousPlacement,
+    captionSize: { width: layout.width, height: layout.height },
+  });
+  return {
+    active: true,
+    placement: { x: placement.x, y: placement.y },
+    overlapRatio: placement.overlapRatio,
+  };
 }
 
 export function positionCaptionLayout(layout, placement) {

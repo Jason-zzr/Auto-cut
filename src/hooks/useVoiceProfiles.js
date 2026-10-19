@@ -37,9 +37,9 @@ export function useVoiceProfiles({ favoriteVoiceIds, setFavoriteVoiceIds, notify
     await deleteVoiceProfile(profileId); setVoiceProfiles((items) => items.filter((item) => item.id !== profileId));
     setSelectedVoiceProfileId((current) => current === profileId ? "" : current); notify(t("cloneVoiceDeleted", "声音档案已删除"));
   }, [notify, t]);
-  const toggleVoiceProfileFavorite = useCallback(async (profileId) => {
+  const toggleVoiceProfileFavorite = useCallback(async (profileId, favorite) => {
     const current = voiceProfiles.find((item) => item.id === profileId); if (!current) return;
-    const updated = await setVoiceProfileFavorite(profileId, !current.favorite);
+    const updated = await setVoiceProfileFavorite(profileId, favorite === undefined ? !current.favorite : favorite);
     if (updated) setVoiceProfiles((items) => items.map((item) => item.id === profileId ? updated : item));
   }, [voiceProfiles]);
 

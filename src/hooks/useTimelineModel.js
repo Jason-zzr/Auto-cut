@@ -176,7 +176,8 @@ export function useTimelineModel(d) {
   const previewVisualOverlays = d.trackVisibility.overlay === false
     ? []
     : getActiveVisualOverlays(d.visualOverlaySegments, d.currentTime).map((overlay) => {
-        const record = d.visionRecords[getVisionKey(overlay)];
+        const record = d.visionRecords[getVisionKey(overlay)] ?? (overlay.vision
+          ? { analysis: overlay.vision, options: overlay.vision.options ?? {} } : null);
         const localTime = Math.max(0, d.currentTime - (overlay.start || 0));
         const sourceTime = overlay.type === "video"
           ? getVisualSourceTime(overlay, localTime)
@@ -235,7 +236,8 @@ export function useTimelineModel(d) {
     width: previewVisualSegment?.width ?? 0,
     height: previewVisualSegment?.height ?? 0,
   } : null));
-  const previewVisionRecord = previewVisionKey ? d.visionRecords[previewVisionKey] ?? null : null;
+  const previewVisionRecord = previewVisionKey ? d.visionRecords[previewVisionKey]
+    ?? (previewVisualSegment?.vision ? { analysis: previewVisualSegment.vision, options: previewVisualSegment.vision.options ?? {} } : null) : null;
   const previewVisionBaseAnalysis = previewVisionRecord?.analysis ?? null;
   const selectedVisualSegmentIndex = Math.max(
     0,

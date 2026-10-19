@@ -149,6 +149,11 @@ export function normalizeSubjectEffect(value) {
       mode: ["original", "color", "blur", "image", "video"].includes(effect.background?.mode)
         ? effect.background.mode
         : DEFAULT_SUBJECT_EFFECT.background.mode,
+      src: typeof effect.background?.src === "string" ? effect.background.src : "",
+      assetId: typeof effect.background?.assetId === "string" ? effect.background.assetId : "",
+      fit: ["cover", "contain"].includes(effect.background?.fit)
+        ? effect.background.fit
+        : DEFAULT_SUBJECT_EFFECT.background.fit,
       opacity: clamp(effect.background?.opacity, 0, 1, DEFAULT_SUBJECT_EFFECT.background.opacity),
       blur: clamp(effect.background?.blur, 0, 80, DEFAULT_SUBJECT_EFFECT.background.blur),
       darken: clamp(effect.background?.darken, 0, 1, DEFAULT_SUBJECT_EFFECT.background.darken),

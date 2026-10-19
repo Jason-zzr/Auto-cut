@@ -1,5 +1,6 @@
 import { makeId } from "./timeline.js";
 import { createChromeBuiltInSession } from "./chromeBuiltInAi.js";
+import { getVisualSourceTime } from "./visualEffects.js";
 
 const AUTO_EDIT_LANGUAGE_TAGS = {
   zh: "zh-CN",
@@ -178,13 +179,16 @@ export function normalizeClipCaptionTimings(captions, clipStart, clipEnd, prefer
   return normalized.filter((caption) => caption.end - caption.start >= 0.19);
 }
 
-function waitForMedia(element, event) {
+function waitForMedia(element, event, signal) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new DOMException("Aborted", "AbortError"));
     const done = () => { cleanup(); resolve(); };
     const fail = () => { cleanup(); reject(element.error || new Error(`Media ${event} failed`)); };
-    const cleanup = () => { element.removeEventListener(event, done); element.removeEventListener("error", fail); };
+    const aborted = () => { cleanup(); reject(new DOMException("Aborted", "AbortError")); };
+    const cleanup = () => { element.removeEventListener(event, done); element.removeEventListener("error", fail); signal?.removeEventListener("abort", aborted); };
     element.addEventListener(event, done, { once: true });
     element.addEventListener("error", fail, { once: true });
+    signal?.addEventListener("abort", aborted, { once: true });
   });
 }
 
@@ -238,6 +242,8 @@ export function getAspectRatioLabel(width, height) {
 export async function extractAutoEditFrames(segments, onProgress = () => {}, signal) {
   const frames = [];
   const flowWorker = createFlowWorkerClient();
+  const abort = () => flowWorker.terminate();
+  signal?.addEventListener("abort", abort, { once: true });
   let timelineStart = 0;
   try {
     for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex += 1) {
@@ -250,9 +256,8 @@ export async function extractAutoEditFrames(segments, onProgress = () => {}, sig
       if (segment.type === "video") {
         const video = document.createElement("video");
         video.muted = true; video.preload = "auto"; video.src = segment.src;
-        if (video.readyState < 1) await waitForMedia(video, "loadedmetadata");
-        const sourceStart = Number(segment.sourceStart) || 0;
-        const sourceDuration = Math.max(0.2, Number(segment.sourceDuration) || video.duration || duration);
+        try {
+        if (video.readyState < 1) await waitForMedia(video, "loadedmetadata", signal);
         // Keep a stable temporal resolution instead of a fixed total-frame cap.
         // Long videos therefore receive proportionally more analysis samples.
         const samplesPerSecond = duration <= 120 ? 1.5 : duration <= 600 ? 1 : 0.75;
@@ -260,18 +265,22 @@ export async function extractAutoEditFrames(segments, onProgress = () => {}, sig
         for (let sample = 0; sample < sampleCount; sample += 1) {
           if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
           const ratio = sampleCount === 1 ? 0 : sample / (sampleCount - 1);
-          video.currentTime = Math.min(Math.max(0, video.duration - 0.05), sourceStart + ratio * sourceDuration);
-          await waitForMedia(video, "seeked");
+          const sourceTime = Math.min(Math.max(0, video.duration - 0.05), getVisualSourceTime(segment, ratio * duration));
+          if (Math.abs(video.currentTime - sourceTime) >= 0.008 || video.readyState < 2) {
+            const sought = waitForMedia(video, "seeked", signal);
+            video.currentTime = sourceTime;
+            await sought;
+          }
           drawContainedFrame(context, video, video.videoWidth, video.videoHeight);
           const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
           const blob = await canvasBlob(canvas);
           const metrics = await flowWorker.analyze(pixels, canvas.width, canvas.height, segment.id);
           frames.push({ segmentId: segment.id, segmentIndex, segmentName: segment.name || `Clip ${segmentIndex + 1}`, segmentStart: timelineStart, segmentEnd: timelineStart + duration, time: timelineStart + ratio * duration, ...metrics, blob, aspectRatio: getAspectRatioLabel(video.videoWidth, video.videoHeight) });
         }
-        video.removeAttribute("src"); video.load();
+        } finally { video.pause(); video.removeAttribute("src"); video.load(); }
       } else if (segment.src) {
         const image = new Image(); image.src = segment.src;
-        if (!image.complete) await waitForMedia(image, "load");
+        if (!image.complete) await waitForMedia(image, "load", signal);
         drawContainedFrame(context, image, image.naturalWidth, image.naturalHeight);
         frames.push({ segmentId: segment.id, segmentIndex, segmentName: segment.name || `Clip ${segmentIndex + 1}`, segmentStart: timelineStart, segmentEnd: timelineStart + duration, time: timelineStart, difference: 1, blob: await canvasBlob(canvas), aspectRatio: getAspectRatioLabel(image.naturalWidth, image.naturalHeight) });
       }
@@ -280,6 +289,7 @@ export async function extractAutoEditFrames(segments, onProgress = () => {}, sig
     }
     return selectCandidatesBySegment(frames);
   } finally {
+    signal?.removeEventListener("abort", abort);
     flowWorker.terminate();
   }
 }

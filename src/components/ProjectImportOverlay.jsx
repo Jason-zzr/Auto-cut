@@ -2,11 +2,13 @@ import { useId, useLayoutEffect, useRef } from "react";
 import { PROJECT_IMPORT_COPY } from "../i18nProjectImport.js";
 import "../styles/projectImport.css";
 
-export default function ProjectImportOverlay({ progress, language = "en" }) {
+export default function ProjectImportOverlay({ progress, request = null, onSelect = () => {}, onCancel = () => {}, language = "en" }) {
   const dialogRef = useRef(null);
   const headingRef = useRef(null);
+  const selectButtonRef = useRef(null);
   const id = useId();
-  const active = Boolean(progress);
+  const selecting = !progress && request?.status === "awaiting_selection";
+  const active = Boolean(progress || selecting);
 
   useLayoutEffect(() => {
     if (!active) return undefined;
@@ -19,16 +21,36 @@ export default function ProjectImportOverlay({ progress, language = "en" }) {
       // The full-screen surface and keyboard guard also work without native dialog support.
       dialog.setAttribute("open", "");
     }
-    headingRef.current?.focus({ preventScroll: true });
+    (selecting ? selectButtonRef.current : headingRef.current)?.focus({ preventScroll: true });
     return () => {
       if (typeof dialog.close === "function") dialog.close();
       else dialog.removeAttribute("open");
       if (previousFocus?.isConnected) previousFocus.focus?.({ preventScroll: true });
     };
-  }, [active]);
+  }, [active, selecting]);
 
-  if (!progress) return null;
+  if (!progress && !selecting) return null;
   const copy = PROJECT_IMPORT_COPY[language] || PROJECT_IMPORT_COPY.en;
+  if (selecting) return <dialog
+    ref={dialogRef}
+    className="project-import-overlay"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby={`${id}-title`}
+    aria-describedby={`${id}-hint`}
+    onCancel={(event) => { event.preventDefault(); onCancel(event); }}
+    onKeyDown={(event) => event.stopPropagation()}
+    onKeyUp={(event) => event.stopPropagation()}
+  >
+    <div className="project-import-card">
+      <h2 ref={headingRef} id={`${id}-title`} tabIndex={-1}>{copy.selectTitle}</h2>
+      <p id={`${id}-hint`} className="project-import-hint">{copy.selectHint}</p>
+      <div className="project-import-actions">
+        <button ref={selectButtonRef} type="button" onClick={onSelect}>{copy.selectButton}</button>
+        <button type="button" onClick={onCancel}>{copy.cancelButton}</button>
+      </div>
+    </div>
+  </dialog>;
   const phase = ["archive", "visuals", "audio", "ready"].includes(progress.phase) ? progress.phase : "archive";
   const completed = Number.isFinite(progress.completed) ? Math.max(0, progress.completed) : null;
   const total = Number.isFinite(progress.total) && progress.total >= 0 ? progress.total : null;

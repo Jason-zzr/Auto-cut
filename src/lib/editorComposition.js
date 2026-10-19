@@ -2,6 +2,7 @@ import { throwIfExportAborted } from "./exportCancellation.js";
 import { prepareEmbeddedVideoAudio } from "./embeddedVideoAudioExport.js";
 import { shouldMuteEmbeddedVideoAudio } from "./sourceAudioSync.js";
 import { getVisionKey } from "./vision.js";
+import { getSegmentDepthAnalysis } from "./depthOfField.js";
 import { createGeneratedExportMetadata } from "./generatedMediaMetadata.js";
 import { filterTimedSegmentsByLaneVisibility } from "./timeline.js";
 
@@ -32,11 +33,11 @@ export async function prepareEditorComposition(d, { exportSettings, exportRange,
     : embeddedVideoAudio.segments;
   const exportedVisualSegments = d.renderedVisualSegments.map((segment) => {
     const record = d.visionRecords[getVisionKey(segment)];
-    const depth = d.depthRecords?.[getVisionKey(segment)];
+    const depth = getSegmentDepthAnalysis(segment, d.depthRecords);
     return {
       ...segment,
       ...(record ? { vision: { ...record.analysis, options: record.options } } : {}),
-      ...(depth ? { depth } : {}),
+      depth,
     };
   });
   const exportedOverlaySegments = d.trackVisibility.overlay === false
@@ -45,11 +46,11 @@ export async function prepareEditorComposition(d, { exportSettings, exportRange,
         .filter((segment) => segment.hidden !== true)
         .map((segment) => {
           const record = d.visionRecords[getVisionKey(segment)];
-          const depth = d.depthRecords?.[getVisionKey(segment)];
+          const depth = getSegmentDepthAnalysis(segment, d.depthRecords);
           return {
             ...segment,
             ...(record ? { vision: { ...record.analysis, options: record.options } } : {}),
-            ...(depth ? { depth } : {}),
+            depth,
           };
         });
   const overlayAudio = exportAudio

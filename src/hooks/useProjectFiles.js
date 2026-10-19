@@ -8,6 +8,7 @@ import { normalizeTrackLocks, normalizeTrackVisibility } from "../lib/projectTra
 import { normalizeTimelineMarkers } from "../lib/timelineMarkers.js";
 import { PROJECT_IMPORT_COPY } from "../i18nProjectImport.js";
 import { captureProjectState, loadProjectMediaBlob, restoreProjectSnapshot } from "../lib/projectSnapshot.js";
+import { getDepthAnalysisSignature, validateDepthAnalysis } from "../lib/depthOfField.js";
 
 const waitForProjectPaint = () => new Promise((resolve) => {
   requestAnimationFrame(() => requestAnimationFrame(resolve));
@@ -15,7 +16,9 @@ const waitForProjectPaint = () => new Promise((resolve) => {
 
 export function useProjectFiles(deps) {
   const [projectImportProgress, setProjectImportProgress] = useState(null);
+  const [projectImportRequest, setProjectImportRequest] = useState(null);
   const importingRef = useRef(false);
+  const importRequestRef = useRef(null);
   const commandStateRef = useRef({ schemaVersion: 1, revision: 0, appliedOperationIds: [] });
   const captureCompleteProject = useCallback(() => captureProjectState({
     ...deps, commandState: commandStateRef.current, sourceVoiceColorOriginal: deps.sourceVoiceColorOriginalRef?.current ?? null,
@@ -57,7 +60,7 @@ export function useProjectFiles(deps) {
     delete restored.imageBlob;
     const assignments = [];
     for (const [key, value] of Object.entries(restored)) {
-      if (["commandState", "projectMedia", "audioBlob", "audioUrl", "audioDuration", "imageBlob", "sourceVoiceColorOriginal"].includes(key)) continue;
+      if (["commandState", "projectMedia", "audioBlob", "audioUrl", "audioDuration", "imageBlob", "sourceVoiceColorOriginal", "depthRecords"].includes(key)) continue;
       const setter = deps[`set${key[0].toUpperCase()}${key.slice(1)}`];
       if (typeof setter !== "function") throw new Error(`无法恢复编辑字段：${key}`);
       assignments.push([setter, value]);
@@ -70,7 +73,7 @@ export function useProjectFiles(deps) {
       deps.sourceAudioUrlRef.current = restored.sourceAudioUrl;
       if (deps.sourceVoiceColorOriginalRef) deps.sourceVoiceColorOriginalRef.current = restored.sourceVoiceColorOriginal;
       deps.markTimelineViewRestored?.(true);
-      deps.clearAllVisionState(); deps.resetHistory(); deps.setShowFileMenu(false);
+      deps.clearAllVisionState(); deps.setDepthRecords(restored.depthRecords); deps.resetHistory(); deps.setShowFileMenu(false);
     } };
   }, [deps]);
   const getProjectSnapshot = useCallback(() => {
@@ -99,6 +102,7 @@ export function useProjectFiles(deps) {
 
   const createCurrentArchive = useCallback(() => createProjectArchive({
     project: getProjectSnapshot(), visualSegments: [...deps.visualSegments, ...deps.visualOverlaySegments],
+    depthRecords: deps.depthRecords,
     audioSegments: deps.audioSegments,
     audio: deps.audioBlob ? { blob: deps.audioBlob, name: "ai-voiceover" } : null,
     sourceAudio: deps.sourceAudioBlob ? { blob: deps.sourceAudioBlob, name: deps.sourceAudioName || "source-audio" } : null,
@@ -132,9 +136,40 @@ export function useProjectFiles(deps) {
     deps.setShowFileMenu(false); deps.notify(options.closed ? "已关闭完整项目" : "已新建空白工程");
   }, [deps]);
 
+  const publishImportRequest = useCallback((request) => {
+    importRequestRef.current = request;
+    setProjectImportRequest(request);
+    return request;
+  }, []);
+  const requestProjectImport = useCallback((requestId) => {
+    const current = importRequestRef.current;
+    if (current?.requestId === requestId) return { ...current };
+    if (importingRef.current || ["awaiting_selection", "importing"].includes(current?.status)) {
+      return { requestId, status: "blocked", error: "另一个工程导入请求正在处理。" };
+    }
+    return publishImportRequest({ requestId, status: "awaiting_selection", fileName: "", error: "" });
+  }, [publishImportRequest]);
+  const inspectProjectImport = useCallback((requestId) => {
+    const current = importRequestRef.current;
+    return current?.requestId === requestId ? { ...current } : { requestId, status: "not_found", fileName: "", error: "" };
+  }, []);
+  const selectProjectImport = useCallback((event) => {
+    if (!event?.isTrusted) throw new Error("请使用工程导入窗口中的按钮选择文件。");
+    if (importRequestRef.current?.status !== "awaiting_selection") return;
+    deps.projectFileInputRef.current?.click();
+  }, [deps.projectFileInputRef]);
+  const cancelProjectImport = useCallback((event) => {
+    if (!event?.isTrusted) throw new Error("请使用工程导入窗口中的按钮取消。");
+    const current = importRequestRef.current;
+    if (current?.status !== "awaiting_selection") return;
+    publishImportRequest({ ...current, status: "cancelled" });
+  }, [publishImportRequest]);
+
   const handleImportProject = useCallback(async (file) => {
-    if (importingRef.current) return;
+    if (importingRef.current) return { outcome: "blocked" };
     if (!file) { deps.projectFileInputRef.current?.click(); return; }
+    const requested = importRequestRef.current?.status === "awaiting_selection" ? importRequestRef.current : null;
+    if (requested) publishImportRequest({ ...requested, status: "importing", fileName: file.name, error: "" });
     importingRef.current = true;
     const createdUrls = new Set();
     let committed = false;
@@ -175,20 +210,44 @@ export function useProjectFiles(deps) {
         if (legacy?.format !== "timeline-studio-project" || !legacy.project) throw archiveError;
         archive = { payload: { ...legacy, media: { visuals: [] } }, visualMedia: new Map(), audio: null, sourceAudio: null, music: null, legacy: true };
       }
-      const { payload, visualMedia, audioSegmentMedia, audio, sourceAudio, music } = archive;
+      const { payload, visualMedia, depthMedia, visionMedia, subjectBackgroundMedia, audioSegmentMedia, audio, sourceAudio, music } = archive;
       const data = payload.project;
       const markers = normalizeTimelineMarkers(data.timelineMarkers);
       const visualUrls = new Map();
       const restoreVisualMedia = (segment) => {
         const media = resolveProjectVisualMedia(visualMedia, segment);
         if (!media?.blob) {
+          if (segment.depth) throw new Error("工程包缺少深度分析对应的源素材");
           return segment?.src ? segment : null;
         }
         if (!visualUrls.has(media.blob)) {
           const src = createImportedUrl(media.blob);
           visualUrls.set(media.blob, src);
         }
-        return { ...segment, src: visualUrls.get(media.blob), blob: media.blob };
+        const restored = { ...segment, src: visualUrls.get(media.blob), blob: media.blob };
+        if (segment.depth) {
+          const samples = segment.depth.samples.map(sample => {
+            const depthBlob = depthMedia?.get(sample.depthUrl);
+            if (!(depthBlob instanceof Blob) || !depthBlob.size) throw new Error("工程包缺少深度分析采样图");
+            return { ...sample, depthUrl: createImportedUrl(depthBlob) };
+          });
+          const depth = { ...segment.depth, samples };
+          const quality = validateDepthAnalysis(depth, restored);
+          restored.depth = { ...depth, signature: getDepthAnalysisSignature(restored, quality) };
+        }
+        if (segment.vision?.cutoutUrl) {
+          const cutoutBlob = visionMedia?.get(segment.vision.cutoutUrl);
+          if (!(cutoutBlob instanceof Blob) || !cutoutBlob.size) throw new Error("工程包缺少视觉抠像图片");
+          restored.vision = { ...segment.vision, cutoutUrl: createImportedUrl(cutoutBlob) };
+        }
+        if (["image", "video"].includes(segment.subjectEffect?.background?.mode) && segment.subjectEffect.background.src) {
+          const backgroundBlob = subjectBackgroundMedia?.get(segment.subjectEffect.background.src);
+          if (!(backgroundBlob instanceof Blob) || !backgroundBlob.size) throw new Error("工程包缺少主体背景素材");
+          restored.subjectEffect = { ...segment.subjectEffect, background: {
+            ...segment.subjectEffect.background, src: createImportedUrl(backgroundBlob),
+          } };
+        }
+        return restored;
       };
       const restoredVisuals = Array.isArray(data.visualSegments) ? data.visualSegments.map((segment) => {
         const restored = restoreVisualMedia(segment);
@@ -296,6 +355,9 @@ export function useProjectFiles(deps) {
       for (const url of visualUrls.values()) deps.imageUrlRefs.current.add(url);
       for (const segment of [...visuals, ...overlays]) {
         if (segment.src?.startsWith("blob:")) deps.imageUrlRefs.current.add(segment.src);
+        for (const sample of segment.depth?.samples || []) deps.imageUrlRefs.current.add(sample.depthUrl);
+        if (segment.vision?.cutoutUrl?.startsWith("blob:")) deps.imageUrlRefs.current.add(segment.vision.cutoutUrl);
+        if (segment.subjectEffect?.background?.src?.startsWith("blob:")) deps.imageUrlRefs.current.add(segment.subjectEffect.background.src);
       }
       deps.setVisualSegments(visuals); deps.setImageDuration(getVisualSegmentsTotal(visuals));
       deps.setVisualOverlaySegments(overlays); deps.setSelectedVisualOverlayId("");
@@ -322,9 +384,14 @@ export function useProjectFiles(deps) {
       // Dismiss loading in the same commit as the complete project, before
       // newly mounted clips start their background filmstrip refinement.
       deps.notify(archive.legacy ? "旧版工程已导入；请重新添加未嵌入的本地媒体，然后导出为 .timeline 工程包" : "工程包已导入，媒体素材已恢复");
+      if (requested) publishImportRequest({ ...requested, status: "completed", fileName: file.name, error: "" });
+      return { outcome: "completed", fileName: file.name };
     } catch (error) {
       console.error("Project import failed", error);
-      deps.notify((PROJECT_IMPORT_COPY[deps.language] || PROJECT_IMPORT_COPY.en).error);
+      const message = (PROJECT_IMPORT_COPY[deps.language] || PROJECT_IMPORT_COPY.en).error;
+      deps.notify(message);
+      if (requested) publishImportRequest({ ...requested, status: "failed", fileName: file.name, error: message });
+      return { outcome: "failed", fileName: file.name, error: message };
     } finally {
       if (importAudioContext) await importAudioContext.close().catch(() => {});
       if (!committed) createdUrls.forEach((url) => URL.revokeObjectURL(url));
@@ -332,7 +399,8 @@ export function useProjectFiles(deps) {
       importingRef.current = false;
       setProjectImportProgress(null);
     }
-  }, [deps]);
+  }, [deps, publishImportRequest]);
 
-  return { projectImportProgress, handleExportProject, handleImportProject, handleNewProject, getProjectSnapshot, createCurrentArchive, captureCompleteProject, prepareCompleteProject };
+  return { projectImportProgress, projectImportRequest, requestProjectImport, inspectProjectImport, selectProjectImport, cancelProjectImport,
+    handleExportProject, handleImportProject, handleNewProject, getProjectSnapshot, createCurrentArchive, captureCompleteProject, prepareCompleteProject };
 }

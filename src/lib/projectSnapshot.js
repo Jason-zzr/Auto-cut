@@ -1,3 +1,6 @@
+import { getDepthAnalysisSignature, getSegmentDepthAnalysis } from "./depthOfField.js";
+import { getVisionKey } from "./vision.js";
+
 // Complete-project snapshots retain media separately from editor runtime objects.
 const stateFields = [
   "script", "commandState", "selectedVoiceId", "speed", "volume", "captionSegments", "captionPosition",
@@ -14,7 +17,7 @@ const rootMedia = {
   imageRef: ["imageBlob", "imageSrc"], audioRef: ["audioBlob", "audioUrl"],
   musicRef: ["musicBlob", "musicUrl"], sourceAudioRef: ["sourceAudioBlob", "sourceAudioUrl"],
 };
-const mediaFields = new Set(["blob", "src", "url", "previewSrc", "originalBlob", "originalSrc", "thumbnail", "compatibilityAudioBlob", "voiceColorOriginalBlob", "voiceColorOriginalUrl"]);
+const mediaFields = new Set(["blob", "src", "url", "previewSrc", "originalBlob", "originalSrc", "thumbnail", "compatibilityAudioBlob", "voiceColorOriginalBlob", "voiceColorOriginalUrl", "depthUrl", "cutoutUrl"]);
 const cacheFields = new Set(["peaks", "originalPeaks", "voiceColorOriginalPeaks", "trackFrames", "trackFrameSampling", "trackFrameDuration", "trackFrameImportBudget"]);
 const referenceKey = (ref) => JSON.stringify([ref.kind, ref.entityId, ref.revision ?? null, ref.blobId ?? null]);
 const loadedProjectMedia = new WeakMap();
@@ -24,6 +27,19 @@ export function captureProjectState(state) {
   for (const key of stateFields) if (state[key] !== undefined) captured[key] = state[key];
   for (const fields of Object.values(rootMedia)) {
     for (const key of fields) if (state[key] !== undefined) captured[key] = state[key];
+  }
+  for (const field of ["visualSegments", "visualOverlaySegments"]) {
+    if (!Array.isArray(captured[field]) || !state.depthRecords) continue;
+    captured[field] = captured[field].map((segment) => {
+      const { depth: _depth, ...visual } = segment;
+      const record = getSegmentDepthAnalysis(segment, state.depthRecords);
+      if (!record?.complete || !record.samples?.length || !record.signature) return visual;
+      let signature;
+      try { signature = JSON.parse(record.signature); } catch { return visual; }
+      if (record.signature !== getDepthAnalysisSignature(segment, signature?.quality)) return visual;
+      // The saved clip owns the source media binding; runtime URLs cannot be cache identities on reopen.
+      return { ...visual, depth: { ...record, signature: getDepthAnalysisSignature({ ...segment, src: "" }, signature.quality) } };
+    });
   }
   const copies = new WeakMap();
   const copy = (value) => {
@@ -107,6 +123,29 @@ export async function serializeProjectSnapshot(captured, { registerMedia, editor
   return { format: "timeline-studio-editor-snapshot", editorSnapshotId, editorSequence, payload, refs: [...refs.values()] };
 }
 
+export async function serializeExecutionBasis(captured, { registerMedia, rippleEditing }) {
+  const {
+    userAssets: _assets, currentTime: _time, timelineZoom: _zoom, selectedTrack: _track,
+    selectedSegmentId: _segment, selectedVisualSegmentId: _visual, selectedVisualOverlayId: _overlay,
+    selectedStickerSegmentId: _sticker, selectedAudioSegmentId: _audio, selectedStickerId: _catalogSticker,
+    ...content
+  } = captured;
+  const { payload } = await serializeProjectSnapshot(content, { registerMedia });
+  // Restoring a Blob-only clip may add a playback URL for the same registered
+  // bytes. Canonicalize that alias, retaining every distinct media reference.
+  const canonical = (value, field) => {
+    if (Array.isArray(value)) return value.map(item => canonical(item));
+    if (!value || typeof value !== "object") return value;
+    return Object.fromEntries(Object.keys(value).sort().filter(key => {
+      if (field !== "mediaBindings") return true;
+      const primary = key === "originalSrc" ? "originalBlob" : key === "voiceColorOriginalUrl" ? "voiceColorOriginalBlob"
+        : ["src", "url", "previewSrc"].includes(key) ? "blob" : null;
+      return !primary || !value[primary] || referenceKey(value[key]) !== referenceKey(value[primary]);
+    }).map(key => [key, canonical(value[key], key)]));
+  };
+  return { project: canonical(payload), rippleEditing: Boolean(rippleEditing) };
+}
+
 export function projectMediaUrl(projectId, ref) {
   if (ref?.kind !== "media" || !ref.entityId || !ref.blobId) throw new Error("无效的项目媒体引用。");
   return `/api/v1/projects/${encodeURIComponent(projectId)}/assets/${encodeURIComponent(ref.entityId)}/content?blobId=${encodeURIComponent(ref.blobId)}`;
@@ -173,6 +212,21 @@ export async function restoreProjectSnapshot(saved, projectId, { verifyMedia, si
     return result;
   };
   const restored = await walk(saved.payload);
+  restored.depthRecords = {};
+  for (const field of ["visualSegments", "visualOverlaySegments"]) {
+    for (const segment of restored[field] || []) {
+      const record = segment.depth;
+      if (!record) continue;
+      delete segment.depth;
+      let signature;
+      try { signature = JSON.parse(record.signature); } catch { throw new Error("项目深度分析签名无效。"); }
+      if (!record.complete || !Array.isArray(record.samples) || !record.samples.length) throw new Error("项目深度分析未完成。");
+      if (record.signature !== getDepthAnalysisSignature({ ...segment, src: "" }, signature?.quality)) continue;
+      restored.depthRecords[getVisionKey(segment)] = {
+        ...record, signature: getDepthAnalysisSignature(segment, signature.quality),
+      };
+    }
+  }
   const bindings = {};
   for (const [key, [blobKey, urlKey]] of Object.entries(rootMedia)) {
     restored[blobKey] = null;

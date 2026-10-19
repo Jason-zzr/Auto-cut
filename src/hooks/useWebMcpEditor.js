@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { createWebMcpTranslator } from "../i18nWebMcp.js";
-import { createWebMcpEditorSession, createWebMcpTools, registerEditorWebMcpTools } from "../lib/webMcpEditor.js";
+import { createWebMcpEditorSession, createWebMcpTools, createBrowserWebMcpTools, registerEditorWebMcpTools } from "../lib/webMcpEditor.js";
 import { useExecutionPlan } from "./useExecutionPlan.js";
 
 export function useWebMcpEditor(editor) {
@@ -19,6 +19,7 @@ export function useWebMcpEditor(editor) {
   const sessionRef = useRef(null);
   const [view, setView] = useState(null);
   const [aiJob, setAiJob] = useState(null);
+  const [detectionPreview, setDetectionPreview] = useState(null);
   const [error, setError] = useState("");
   const [working, setWorking] = useState(false);
   const execution = useExecutionPlan(() => latest.current, () => sessionRef.current);
@@ -55,9 +56,17 @@ export function useWebMcpEditor(editor) {
   }, []);
 
   useEffect(() => {
-    const registration = registerEditorWebMcpTools(document, navigator, createWebMcpTools(sessionRef.current, t));
+    const registration = registerEditorWebMcpTools(document, navigator, createBrowserWebMcpTools(createWebMcpTools(sessionRef.current, t)));
     return () => registration.dispose();
   }, [t]);
+
+  useEffect(() => {
+    const frame = aiJob?.kind === "visual_detect" && aiJob.status === "succeeded" ? sessionRef.current?.detectionFrame(aiJob.jobId) : null;
+    if (!frame) { setDetectionPreview(null); return; }
+    const url = URL.createObjectURL(frame);
+    setDetectionPreview({ jobId: aiJob.jobId, url });
+    return () => URL.revokeObjectURL(url);
+  }, [aiJob, editor.assets]);
 
   const run = async (name, input, event) => {
     if (!sessionRef.current || working) return;
@@ -72,7 +81,23 @@ export function useWebMcpEditor(editor) {
     } finally { setWorking(false); }
   };
   return {
-    t, view, aiJob, error, working, execution,
+    t, view, aiJob, detectionPreview, error, working, execution,
+    cutoutCandidate: async (event, detectionJobId, candidateIndex, allowModelDownload, output = "image") => {
+      if (!event?.isTrusted || working || !sessionRef.current || allowModelDownload !== true) return;
+      setWorking(true); setError("");
+      try {
+        const invoke = async (name, input) => {
+          const result = await sessionRef.current.run(name, input);
+          if (!result.ok) throw new Error(result.error.message);
+          return result;
+        };
+        const state = await invoke("timeline_project_inspect", {});
+        const prepared = await invoke("timeline_ai_prepare", { stateToken: state.stateToken,
+          request: { kind: "visual_cutout", detectionJobId, candidateIndex, output } });
+        await invoke("timeline_ai_start", { aiId: prepared.aiId, requestId: crypto.randomUUID(), allowModelDownload });
+      } catch (error) { setError(error.message); }
+      finally { setWorking(false); }
+    },
     isAiRunning: () => sessionRef.current?.isAiRunning() === true,
     cancelAi: () => run("timeline_ai_cancel", { jobId: aiJob?.jobId }),
     dismissAi: () => setAiJob(null),

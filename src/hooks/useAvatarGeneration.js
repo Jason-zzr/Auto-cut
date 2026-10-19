@@ -7,6 +7,36 @@ import { decodeAvatarAudio16k, encodeAvatarFrames, formatAvatarProgress, runAvat
 const createMotionWorker = () => new Worker(new URL("../workers/joyvasa.worker.js", import.meta.url), { type: "module" });
 const createRenderWorker = () => new Worker(new URL("../workers/liveportrait.worker.js", import.meta.url), { type: "module" });
 
+export async function generateAvatarAsset({ portrait, audio, portraitKey, language, quality, duration, renderFps, neuralFps, signal, onProgress }) {
+  const check = () => { if (signal?.aborted) throw new DOMException("Canceled", "AbortError"); };
+  check();
+  let motionWorker, renderWorker;
+  try {
+    const samples = await decodeAvatarAudio16k(audio);
+    check();
+    const joyVasaModelBaseUrls = getJoyVasaProjectModelBaseUrls(language);
+    const livePortraitModelBaseUrls = getLivePortraitProjectModelBaseUrls(language);
+    motionWorker = createMotionWorker();
+    const motion = await runAvatarWorkerTask(motionWorker, { type: "generate", audioSamples: samples.buffer,
+      modelBaseUrl: joyVasaModelBaseUrls }, [samples.buffer], "motion", onProgress, signal);
+    check();
+    await runAvatarWorkerTask(motionWorker, { type: "release", modelBaseUrl: joyVasaModelBaseUrls }, [], "released", undefined, signal);
+    motionWorker.terminate(); motionWorker = null;
+    renderWorker = createRenderWorker();
+    const result = await runAvatarWorkerTask(renderWorker, {
+      type: "generateVideo", portraitBlob: portrait, motionBuffer: motion.motion,
+      modelBaseUrl: import.meta.env?.VITE_LIVE_PORTRAIT_MODEL_BASE_URL || "",
+      joyVasaModelBaseUrl: joyVasaModelBaseUrls, webGpuModelBaseUrl: livePortraitModelBaseUrls,
+      quality, duration, renderFps, neuralFps, portraitKey,
+    }, [motion.motion], "videoFrames", onProgress, signal);
+    check();
+    const blob = await encodeAvatarFrames(result.blobs, result.width, result.height, result.fps, result.keyframeTimes, result.duration,
+      { signal, onProgress: progress => onProgress?.({ progress: 95 + progress * 4 }) });
+    check();
+    return { blob, width: result.width, height: result.height, duration: result.duration, fps: result.fps };
+  } finally { motionWorker?.terminate(); renderWorker?.terminate(); }
+}
+
 export function useAvatarGeneration(d) {
   const openAvatarPanel = useCallback(() => {
     d.setAvatarPanelOpen(true);

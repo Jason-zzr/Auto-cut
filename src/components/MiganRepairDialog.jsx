@@ -24,7 +24,7 @@ function formatSeconds(value) {
   return `${Math.max(0, Number(value) || 0).toFixed(2)}s`;
 }
 
-export function MiganRepairDialog({ repair, segment, t, onApplied }) {
+export function MiganRepairDialog({ repair, segment, t, onApplied, selectionAction }) {
   const stageRef = useRef(null);
   const rangeTrackRef = useRef(null);
   const videoRef = useRef(null);
@@ -401,10 +401,10 @@ export function MiganRepairDialog({ repair, segment, t, onApplied }) {
               </article>)}
             </div>
             {isVideo && repair.job.running ? <p className="repair-dialog-hint" role="status">{t("repairBackgroundHint")}</p> : null}
-            {isVideo ? <p className="repair-dialog-hint">{t("repairTemporalHint")}</p> : null}
-            <p className="repair-dialog-hint">{t("repairIterationHint")}</p>
+            {!selectionAction && isVideo ? <p className="repair-dialog-hint">{t("repairTemporalHint")}</p> : null}
+            {!selectionAction ? <p className="repair-dialog-hint">{t("repairIterationHint")}</p> : null}
             {repair.resultDirty && hasComparison ? <p className="repair-dialog-hint" role="status">{t("repairDraftChanged")}</p> : null}
-            <p className="repair-dialog-hint">{isVideo ? t("repairPositionHint") : t("repairImageHint")}</p>
+            {!selectionAction ? <p className="repair-dialog-hint">{isVideo ? t("repairPositionHint") : t("repairImageHint")}</p> : null}
             {repair.preview && !isVideo ? <div className="repair-change-diagnostic">
               <span>{t("repairPixelChange")}</span>
               <strong>{Math.round((repair.preview.composedChangedRatio ?? repair.preview.changedRatio ?? 0) * 100)}%</strong>
@@ -418,10 +418,13 @@ export function MiganRepairDialog({ repair, segment, t, onApplied }) {
             {repair.job.progress > 0 ? <>
               <span>{t(repair.job.phaseKey, repair.job.phaseKey)}{repair.job.phaseKey !== "repairPhaseStopping" ? ` · ${Math.round(repair.job.progress)}%` : ""}</span>
               <i className={repair.job.phaseKey === "repairPhaseStopping" ? "is-stopping" : ""}><b style={{ width: `${repair.job.phaseKey === "repairPhaseStopping" ? 100 : clamp(repair.job.progress, 0, 100)}%` }} /></i>
-            </> : <span>{t("repairSafeNote")}</span>}
+            </> : !selectionAction ? <span>{t("repairSafeNote")}</span> : null}
           </div>
           <div>
-            {repair.job.running ? <button type="button" className="panel-secondary is-danger" disabled={repair.job.phaseKey === "repairPhaseStopping"} onClick={repair.cancel}>{repair.job.phaseKey === "repairPhaseStopping" ? t("repairStopping") : t("repairCancel")}</button> : <>
+            {selectionAction ? <>
+              <button type="button" className="panel-secondary" onClick={repair.closeDialog}>{t("repairCancel")}</button>
+              <button type="button" className="panel-primary" disabled={!repair.regions.length} onClick={selectionAction.onConfirm}><Check size={16} />{selectionAction.label}</button>
+            </> : repair.job.running ? <button type="button" className="panel-secondary is-danger" disabled={repair.job.phaseKey === "repairPhaseStopping"} onClick={repair.cancel}>{repair.job.phaseKey === "repairPhaseStopping" ? t("repairStopping") : t("repairCancel")}</button> : <>
               <button type="button" className="panel-secondary" onClick={repair.closeDialog}>{t("repairCancel")}</button>
               <button type="button" className="panel-secondary" onClick={() => previewFrame()}>{isVideo ? t("repairTestFrame") : t("repairPreviewFrame")}</button>
               {isVideo ? <>

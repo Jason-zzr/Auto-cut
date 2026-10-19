@@ -1,6 +1,6 @@
 import { orderModelUrlsForNetwork } from "../lib/modelSources.js";
 
-const MODEL_REVISION = "927cd9272154b85c53518daf44063ee033ee22c3";
+import { VOCAL_SEPARATION_MODEL_REVISION as MODEL_REVISION } from "../config/models.js";
 const HUGGING_FACE_MODEL_URL =
   `https://huggingface.co/haixin/timeline-studio-vocal-remover/resolve/${MODEL_REVISION}/model.json`;
 const MODEL_SCOPE_MODEL_URL =

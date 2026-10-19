@@ -146,10 +146,10 @@ export function createAudioTrackActions(d) {
     d.notify(message);
   }
 
-  function clearSourceAudioTrack(message = "视频原声已从时间线移除") {
+  function clearSourceAudioTrack(message = "视频原声已从时间线移除", { preserveMediaUrl = false } = {}) {
     d.sourceAudioRef.current?.pause();
     if (d.sourceAudioUrlRef.current) {
-      URL.revokeObjectURL(d.sourceAudioUrlRef.current);
+      if (!preserveMediaUrl) URL.revokeObjectURL(d.sourceAudioUrlRef.current);
       d.sourceAudioUrlRef.current = "";
     }
     d.setSourceAudioBlob(null);
@@ -174,10 +174,10 @@ export function createAudioTrackActions(d) {
     if (message) d.notify(message);
   }
 
-  function clearMusicTrack(message = "背景音乐已从时间线移除") {
+  function clearMusicTrack(message = "背景音乐已从时间线移除", { preserveMediaUrl = false } = {}) {
     d.musicRef.current?.pause();
     if (d.musicUrlRef.current) {
-      URL.revokeObjectURL(d.musicUrlRef.current);
+      if (!preserveMediaUrl) URL.revokeObjectURL(d.musicUrlRef.current);
       d.musicUrlRef.current = "";
     }
     d.setMusicBlob(null);
@@ -197,7 +197,7 @@ export function createAudioTrackActions(d) {
     )));
     d.setIsPlaying(false);
     d.setSelectedTrack("music");
-    d.notify(message);
+    if (message) d.notify(message);
   }
 
   async function commitAudio(blob, nextStatusText, options = {}) {

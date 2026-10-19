@@ -1,46 +1,138 @@
 import { MIN_VISUAL_SEGMENT_SECONDS } from "../config/editor.js";
 import { cloneVisualSegment, createVisualSegment, getVisualSegmentTimeline, getVisualSegmentsTotal, isTimedSegmentLaneLocked, makeId, materializeCaptionTimings } from "./timeline.js";
-import { normalizeVisualKeyframes, resolveVisualTransform } from "./visualEffects.js";
+import { normalizeVisualKeyframes, resolveVisualTransform, VISUAL_PROPERTY_KEYS } from "./visualEffects.js";
+import { getColorGradeProperty, resolveColorGrade } from "./colorGrade.js";
+import { getVisualSpeedCurveAverageRate, getVisualSpeedCurveSourceProgress, getVisualSpeedCurveTimelineProgress, sliceVisualSpeedCurve } from "./visualSpeedCurve.js";
 
 const MIN_CAPTION_SPLIT_SECONDS = 0.2;
 
-function splitVisualKeyframes(keyframes, splitTime, duration, baseTransform) {
+export function splitCaptionSegmentState(source, splitTime) {
+  return [
+    { ...source, id: makeId("caption"), end: splitTime },
+    { ...source, id: makeId("caption"), start: splitTime },
+  ];
+}
+
+export function splitAudioSegmentState(source, time) {
+  const firstDuration = time - source.start;
+  const secondDuration = source.duration - firstDuration;
+  const playbackRate = Math.max(0.25, Math.min(4, Number(source.playbackRate) || 1));
+  const peakCount = source.peaks?.length || 0;
+  const peakSplit = peakCount > 1 ? Math.max(1, Math.min(peakCount - 1, Math.round(firstDuration / source.duration * peakCount))) : 0;
+  return [
+    { ...source, duration: firstDuration, sourceDuration: firstDuration * playbackRate,
+      peaks: peakCount ? source.peaks.slice(0, peakSplit) : [], fadeOut: 0 },
+    { ...source, start: time, duration: secondDuration, sourceDuration: secondDuration * playbackRate,
+      sourceStart: Math.max(0, Number(source.sourceStart) || 0) + firstDuration * playbackRate,
+      peaks: peakCount ? source.peaks.slice(peakSplit) : [], fadeIn: 0 },
+  ];
+}
+
+function sliceVisualKeyframes(keyframes, startTime, endTime, baseTransform, colorGrade) {
   const frames = normalizeVisualKeyframes(keyframes);
-  if (!frames.length) return { left: frames, right: frames };
-  const splitTransform = resolveVisualTransform(frames, splitTime, baseTransform);
-  return {
-    left: normalizeVisualKeyframes([
-      ...frames.filter((frame) => frame.time < splitTime),
-      { time: splitTime, ...splitTransform },
-    ]),
-    right: normalizeVisualKeyframes([
-      { time: 0, ...splitTransform },
-      ...frames
-        .filter((frame) => frame.time > splitTime && frame.time <= duration)
-        .map((frame) => ({ ...frame, time: frame.time - splitTime })),
-    ]),
+  if (!frames.length) return frames;
+  const boundary = time => {
+    const transform = resolveVisualTransform(frames, time, baseTransform);
+    const grade = resolveColorGrade(frames, time, colorGrade);
+    // A property must stay at its base value until its first original keyframe.
+    return Object.fromEntries(VISUAL_PROPERTY_KEYS.filter(key => frames.some(frame =>
+      frame.time <= time && Number.isFinite(Number(frame[key])))).map(key =>
+      [key, key.startsWith("colorGrade.") ? getColorGradeProperty(grade, key) : transform[key]]));
   };
+  return normalizeVisualKeyframes([
+    { time: 0, ...boundary(startTime) },
+    ...frames.filter(frame => frame.time > startTime && frame.time < endTime)
+      .map(frame => ({ ...frame, time: frame.time - startTime })),
+    { time: endTime - startTime, ...boundary(endTime) },
+  ]);
+}
+
+function assertVisualSourceSlice(source) {
+  if (source.reversed || source.reverse) throw Object.assign(new Error("Reversed visual timing cannot be sliced"), { code: "UNSUPPORTED_TIMING" });
+  if (Object.values(source.propertyKeyframes || {}).some(frames => frames?.length)) {
+    throw Object.assign(new Error("Legacy property keyframes cannot be sliced"), { code: "UNSUPPORTED_TIMING" });
+  }
+}
+
+function visualSlicePatch(source, startTime, endTime) {
+  assertVisualSourceSlice(source);
+  const duration = Math.max(0, Number(source.duration) || 0);
+  const start = Math.max(0, Math.min(duration, Number(startTime) || 0));
+  const end = Math.max(start, Math.min(duration, Number(endTime) || 0));
+  const patch = { duration: end - start };
+  if (Array.isArray(source.keyframes)) patch.keyframes = sliceVisualKeyframes(source.keyframes, start, end, source.baseTransform, source.colorGrade);
+  if (source.type !== "video") return patch;
+  const sourceStart = Math.max(0, Number(source.sourceStart) || 0);
+  const playbackRate = Math.max(0.25, Math.min(4, Number(source.playbackRate) || 1));
+  const sourceDuration = Math.max(0, Number(source.sourceDuration) || duration * playbackRate);
+  if (source.speedCurve?.enabled) {
+    const startProgress = duration ? start / duration : 0;
+    const endProgress = duration ? end / duration : 1;
+    const sourceIn = getVisualSpeedCurveSourceProgress(source.speedCurve, startProgress);
+    const sourceOut = getVisualSpeedCurveSourceProgress(source.speedCurve, endProgress);
+    const speedCurve = sliceVisualSpeedCurve(source.speedCurve, startProgress, endProgress);
+    return { ...patch, sourceStart: sourceStart + sourceDuration * sourceIn,
+      sourceDuration: sourceDuration * (sourceOut - sourceIn), speedCurve,
+      playbackRate: getVisualSpeedCurveAverageRate(speedCurve) };
+  }
+  return { ...patch, sourceStart: sourceStart + start * playbackRate,
+    sourceDuration: (end - start) * playbackRate, playbackRate };
+}
+
+export function trimVisualSegmentState(source, sourceIn, sourceOut) {
+  assertVisualSourceSlice(source);
+  const duration = Math.max(0, Number(source.duration) || 0);
+  const retainedStart = Math.max(0, Number(source.sourceStart) || 0);
+  const retainedDuration = Math.max(0, Number(source.sourceDuration) || duration * Math.max(0.25, Math.min(4, Number(source.playbackRate) || 1)));
+  const from = Number(sourceIn), to = Number(sourceOut);
+  if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from || from < retainedStart || to > retainedStart + retainedDuration) {
+    throw Object.assign(new Error("Trim range exceeds the retained visual source"), { code: "SOURCE_RANGE_EXCEEDED" });
+  }
+  const sourceStartProgress = retainedDuration ? (from - retainedStart) / retainedDuration : 0;
+  const sourceEndProgress = retainedDuration ? (to - retainedStart) / retainedDuration : 1;
+  const rate = Math.max(0.25, Math.min(4, Number(source.playbackRate) || 1));
+  const startTime = source.speedCurve?.enabled
+    ? getVisualSpeedCurveTimelineProgress(source.speedCurve, sourceStartProgress) * duration
+    : (from - retainedStart) / rate;
+  const endTime = source.speedCurve?.enabled
+    ? getVisualSpeedCurveTimelineProgress(source.speedCurve, sourceEndProgress) * duration
+    : (to - retainedStart) / rate;
+  return cloneVisualSegment(source, { ...visualSlicePatch(source, startTime, endTime), sourceStart: from, sourceDuration: to - from });
+}
+
+export function resizeVisualSegmentState(source, duration) {
+  assertVisualSourceSlice(source);
+  const currentDuration = Math.max(0, Number(source.duration) || 0);
+  const nextDuration = Number(duration);
+  if (!Number.isFinite(nextDuration) || nextDuration <= 0 || nextDuration > currentDuration + 0.000001) {
+    throw Object.assign(new Error("Resize exceeds the retained visual source"), { code: "SOURCE_RANGE_EXCEEDED" });
+  }
+  return cloneVisualSegment(source, visualSlicePatch(source, 0, nextDuration));
+}
+
+export function splitOverlaySegmentState(source, time) {
+  const duration = Math.max(0, Number(source.duration) || 0);
+  const firstDuration = time - Math.max(0, Number(source.start) || 0);
+  return [
+    cloneVisualSegment(source, {
+      id: source.id, ...visualSlicePatch(source, 0, firstDuration),
+    }),
+    cloneVisualSegment(source, {
+      id: source.id, start: time, ...visualSlicePatch(source, firstDuration, duration),
+    }),
+  ];
 }
 
 export function splitVisualSegmentState(source, firstDuration, secondDuration) {
-  const playbackRate = source.type === "video"
-    ? Math.max(0.25, Math.min(4, Number(source.playbackRate) || 1))
-    : 1;
-  const sourceStart = Math.max(0, Number(source.sourceStart) || 0);
+  const duration = firstDuration + secondDuration;
   return [
     cloneVisualSegment(source, {
       id: makeId("visual"),
-      duration: firstDuration,
-      sourceDuration: source.type === "video" ? firstDuration * playbackRate : source.sourceDuration,
-      sourceStart,
+      ...visualSlicePatch(source, 0, firstDuration),
     }),
     cloneVisualSegment(source, {
       id: makeId("visual"),
-      duration: secondDuration,
-      sourceDuration: source.type === "video" ? secondDuration * playbackRate : source.sourceDuration,
-      sourceStart: source.type === "video"
-        ? sourceStart + firstDuration * playbackRate
-        : sourceStart,
+      ...visualSlicePatch(source, firstDuration, duration),
     }),
   ];
 }
@@ -58,6 +150,7 @@ export function createTimelineCutActions(d) {
     const index = timeline.findIndex((range) => time > range.start && time < range.end);
     const range = timeline[index]; const source = segments[index];
     if (!source || !range) return void d.notify("请先选中要剪切的视觉片段");
+    if (source.reversed || source.reverse || Object.values(source.propertyKeyframes || {}).some((frames) => frames?.length)) return void d.notify("当前片段的复杂时序暂不支持剪切");
     const firstDuration = time - range.start; const secondDuration = range.end - time;
     if (firstDuration < MIN_VISUAL_SEGMENT_SECONDS || secondDuration < MIN_VISUAL_SEGMENT_SECONDS) return void d.notify("切点离片段边缘太近，先把播放头移到片段中间");
     const [first, second] = splitVisualSegmentState(source, firstDuration, secondDuration);
@@ -78,9 +171,7 @@ export function createTimelineCutActions(d) {
       return void d.notify("请把播放头放在字幕片段中间再剪切");
     }
     const next = [...timedSegments];
-    next.splice(index, 1,
-      { ...source, id: makeId("caption"), end: splitTime },
-      { ...source, id: makeId("caption"), start: splitTime });
+    next.splice(index, 1, ...splitCaptionSegmentState(source, splitTime));
     d.commitCaptionSegments(next, "已在播放头位置切开字幕片段", index + 1);
   };
   const handleCutAudioSegment = () => {
@@ -146,18 +237,9 @@ export function createTimelineCutActions(d) {
     ));
     const source = segments[index];
     if (!source) return void d.notify("请把播放头放在音乐片段中间再剪切");
-    const firstDuration = d.currentTime - source.start;
-    const secondDuration = source.duration - firstDuration;
-    const playbackRate = Math.max(0.25, Math.min(4, Number(source.playbackRate) || 1));
-    const peakCount = source.peaks?.length || 0;
-    const peakSplit = peakCount > 1 ? Math.max(1, Math.min(peakCount - 1, Math.round(firstDuration / source.duration * peakCount))) : 0;
-    const first = { ...source, id: makeId("music"), duration: firstDuration,
-      sourceDuration: firstDuration * playbackRate,
-      peaks: peakCount ? source.peaks.slice(0, peakSplit) : [], fadeOut: 0 };
-    const second = { ...source, id: makeId("music"), start: d.currentTime, duration: secondDuration,
-      sourceDuration: secondDuration * playbackRate,
-      sourceStart: Math.max(0, Number(source.sourceStart) || 0) + firstDuration * playbackRate,
-      peaks: peakCount ? source.peaks.slice(peakSplit) : [], fadeIn: 0 };
+    const [first, second] = splitAudioSegmentState(source, d.currentTime);
+    first.id = makeId("music");
+    second.id = makeId("music");
     const next = [...segments];
     next.splice(index, 1, first, second);
     d.setMusicSegments(next);
@@ -169,6 +251,7 @@ export function createTimelineCutActions(d) {
     const index = d.visualOverlaySegments.findIndex((segment) => segment.id === d.selectedVisualOverlayId);
     const source = d.visualOverlaySegments[index];
     if (!source) return void d.notify("请先选择一个画中画片段");
+    if (source.reversed || source.reverse || Object.values(source.propertyKeyframes || {}).some((frames) => frames?.length)) return void d.notify("当前片段的复杂时序暂不支持剪切");
     const start = Math.max(0, Number(source.start) || 0);
     const duration = Math.max(0, Number(source.duration) || 0);
     const time = Math.max(start, Math.min(start + duration, d.currentTime));
@@ -177,30 +260,13 @@ export function createTimelineCutActions(d) {
     if (firstDuration < MIN_VISUAL_SEGMENT_SECONDS || secondDuration < MIN_VISUAL_SEGMENT_SECONDS) {
       return void d.notify("切点离片段边缘太近，先把播放头移到片段中间");
     }
-    const firstId = makeId("overlay");
-    const secondId = makeId("overlay");
-    const playbackRate = source.type === "video" ? Math.max(0.25, Math.min(4, Number(source.playbackRate) || 1)) : 1;
-    const keyframes = splitVisualKeyframes(source.keyframes, firstDuration, duration, source.baseTransform);
-    const first = cloneVisualSegment(source, {
-      id: firstId,
-      duration: firstDuration,
-      keyframes: keyframes.left,
-      ...(source.type === "video" ? { sourceDuration: firstDuration * playbackRate } : {}),
-    });
-    const second = cloneVisualSegment(source, {
-      id: secondId,
-      start: time,
-      duration: secondDuration,
-      keyframes: keyframes.right,
-      ...(source.type === "video" ? {
-        sourceStart: Math.max(0, Number(source.sourceStart) || 0) + firstDuration * playbackRate,
-        sourceDuration: secondDuration * playbackRate,
-      } : {}),
-    });
+    const [first, second] = splitOverlaySegmentState(source, time);
+    first.id = makeId("overlay");
+    second.id = makeId("overlay");
     const next = [...d.visualOverlaySegments];
     next.splice(index, 1, first, second);
     d.setVisualOverlaySegments(next);
-    d.setSelectedVisualOverlayId(secondId);
+    d.setSelectedVisualOverlayId(second.id);
     d.notify("已在播放头位置切开视觉片段");
   };
   const handleCutTrack = () => {

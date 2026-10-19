@@ -1,6 +1,24 @@
 import { MAX_TIMELINE_MARKER_SECONDS, TIMELINE_MARKER_COLORS, TIMELINE_MARKER_TYPES, normalizeTimelineMarkers } from "./timelineMarkers.js";
-import { getCaptionTimeline, getTimedSegmentsEnd } from "./timeline.js";
-import { CAPTION_FONT_CATALOG } from "./captionFonts.js";
+import { getCaptionTimeline, getTimedSegmentsEnd, createStickerSegment, getTimedSegmentLaneStateKey } from "./timeline.js";
+import { CAPTION_FONT_CATALOG, resolveCaptionStyleForSegment } from "./captionFonts.js";
+import { CAPTION_VISUAL_STYLE_KEYS, getCaptionStylePreset, applyCaptionPresetToStyle, buildCaptionPresetSnapshot, resolveCaptionSizeForSegment } from "./captionStyles.js";
+import { AUDIO_SPATIAL_EFFECTS } from "./audioSpatialEffects.js";
+import { normalizeVisualTransform, upsertVisualPropertyKeyframe, removeVisualPropertyKeyframe, updateVisualSegmentPlaybackRate } from "./visualEffects.js";
+import { COLOR_GRADE_KEYFRAME_KEYS, normalizeColorGrade } from "./colorGrade.js";
+import { FILTER_OPTIONS, STICKER_LIBRARY, DEFAULT_STICKER_SEGMENT_SECONDS, MIN_VISUAL_SEGMENT_SECONDS, MAX_TIMELINE_DURATION_SECONDS } from "../config/editor.js";
+import { VISUAL_CLIP_ANIMATION_OPTIONS, normalizeVisualClipAnimation } from "./visualClipAnimations.js";
+import { updateSubjectEffect } from "./subjectEffects.js";
+import { updateClickRippleEffect } from "./clickRippleEffect.js";
+import { normalizeCinematicDepth } from "./depthOfField.js";
+import { normalizePhotoParallax } from "./photoParallax.js";
+import { parseSrt, appendImportedCaptions, MAX_SRT_FILE_BYTES } from "./subtitles.js";
+import { getLinkedSourceAudioSegments } from "./sourceAudioSync.js";
+import { normalizeVectorDesign, buildVectorDesignPatch } from "./vectorDesign.js";
+import { createEditableVectorDocument, updateVectorPart } from "./vectorDocument.js";
+import { updateVisualSegmentSpeedCurve } from "./visualSpeedCurve.js";
+import { validateMiganRegions } from "./miganRepairRegions.js";
+import { resizeVisualSegmentState, splitCaptionSegmentState, splitAudioSegmentState, splitOverlaySegmentState, splitVisualSegmentState, trimVisualSegmentState } from "./timelineCutActions.js";
+import { normalizeSmartFrame } from "./smartFrame.js";
 
 export const PROJECT_COMMAND_SCHEMA_VERSION = 1;
 
@@ -84,11 +102,15 @@ function resolveProjectCaptions(project) {
 
 // Caption timing can be implicit in a saved project. Match the editor's
 // voice-track clock before editing so inserting an explicit caption or adding
-// voice media cannot rescale the existing subtitles behind the review. Reads
-// use the same resolver without the editable-duration constraint.
+// voice media cannot rescale the existing subtitles behind the review. Imported
+// SRT cues may be shorter than the minimum used when creating or resizing cues.
 export function materializeProjectCaptionTimings(project) {
   const captions = resolveProjectCaptions(project);
-  for (const caption of captions) requireCaptionRange(caption.start, caption.end);
+  for (const caption of captions) {
+    finiteNonNegative(caption.start, "caption start");
+    finiteNonNegative(caption.end, "caption end");
+    if (caption.end <= caption.start) invalidArgument("Caption end must follow its start");
+  }
   return { ...project, captionSegments: captions };
 }
 
@@ -131,19 +153,25 @@ function resizeTimed(project, operation) {
   const start = Object.hasOwn(operation, "start") ? finiteNonNegative(operation.start, "start") : previousStart;
   const duration = finitePositive(operation.duration, "duration");
   const sourceBacked = ["audio", "music"].includes(operation.track) || segment.type === "video";
+  let resizedVisual = null;
   if (sourceBacked) {
-    if (segment.speedCurve?.enabled || segment.reversed || segment.reverse) throw Object.assign(new Error("Complex source timing cannot be resized"), { code: "UNSUPPORTED_TIMING" });
-    const rate = visualPlaybackRate(segment);
-    const retainedSourceDuration = Number(segment.sourceDuration) || Number(segment.duration) * rate;
-    if (duration * rate > retainedSourceDuration + 0.000001) throw Object.assign(new Error("Resize exceeds the retained source range"), { code: "SOURCE_RANGE_EXCEEDED" });
-    segment.sourceDuration = duration * rate;
+    const visualOverlay = ["overlay", "overlays"].includes(operation.track) && segment.type === "video";
+    if (segment.reversed || segment.reverse || segment.speedCurve?.enabled && !visualOverlay) throw Object.assign(new Error("Complex source timing cannot be resized"), { code: "UNSUPPORTED_TIMING" });
+    if (segment.speedCurve?.enabled) resizedVisual = resizeVisualSegmentState(segment, duration);
+    else {
+      const rate = visualPlaybackRate(segment);
+      const retainedSourceDuration = Number(segment.sourceDuration) || Number(segment.duration) * rate;
+      if (duration * rate > retainedSourceDuration + 0.000001) throw Object.assign(new Error("Resize exceeds the retained source range"), { code: "SOURCE_RANGE_EXCEEDED" });
+      segment.sourceDuration = duration * rate;
+    }
   }
+  if (resizedVisual) Object.assign(segment, resizedVisual);
   segment.start = start;
   segment.duration = duration;
   if (Number.isFinite(segment.fadeIn)) segment.fadeIn = Math.min(segment.fadeIn, duration);
   if (Number.isFinite(segment.fadeOut)) segment.fadeOut = Math.min(segment.fadeOut, duration);
-  if (Array.isArray(segment.keyframes)) segment.keyframes = remapKeyframes(segment.keyframes, 0, duration);
-  if (segment.propertyKeyframes) segment.propertyKeyframes = Object.fromEntries(Object.entries(segment.propertyKeyframes).map(([key, frames]) => [key, remapKeyframes(frames, 0, duration)]));
+  if (!resizedVisual && Array.isArray(segment.keyframes)) segment.keyframes = remapKeyframes(segment.keyframes, 0, duration);
+  if (!resizedVisual && segment.propertyKeyframes) segment.propertyKeyframes = Object.fromEntries(Object.entries(segment.propertyKeyframes).map(([key, frames]) => [key, remapKeyframes(frames, 0, duration)]));
   if (operation.track === "audio") {
     const delta = start - previousStart;
     updateLinkedCaptionTiming(project, segment.id, delta, start + duration);
@@ -183,7 +211,7 @@ function trimVisual(project, operation) {
   materializeSourceAudioMappings(project);
   const segment = findById(project.visualSegments, operation.clipId, "Visual clip");
   if (segment.type !== "video") throw Object.assign(new Error("visual.trim currently supports video clips only"), { code: "UNSUPPORTED_MEDIA_TYPE" });
-  trimSourceRange(segment, operation);
+  Object.assign(segment, trimVisualSegmentState(segment, operation.sourceIn, operation.sourceOut));
 }
 
 function trimSourceRange(segment, operation) {
@@ -217,11 +245,87 @@ function trimTimed(project, operation) {
     || !["audio", "music"].includes(operation.track) && segment.type !== "video") {
     throw Object.assign(new Error("Source trimming requires audio or video media"), { code: "UNSUPPORTED_MEDIA_TYPE" });
   }
-  if (segment.speedCurve?.enabled || segment.reversed || segment.reverse) throw Object.assign(new Error("Complex source timing cannot be trimmed"), { code: "UNSUPPORTED_TIMING" });
-  const { removedLocalTime, duration } = trimSourceRange(segment, operation);
+  const visualOverlay = ["overlay", "overlays"].includes(operation.track);
+  if (segment.reversed || segment.reverse || segment.speedCurve?.enabled && !visualOverlay) {
+    throw Object.assign(new Error("Complex source timing cannot be trimmed"), { code: "UNSUPPORTED_TIMING" });
+  }
+  const previousDuration = Number(segment.duration) || 0;
+  const trimmed = visualOverlay && segment.speedCurve?.enabled
+    ? trimVisualSegmentState(segment, operation.sourceIn, operation.sourceOut)
+    : null;
+  const result = trimmed ? { removedLocalTime: previousDuration - trimmed.duration, duration: trimmed.duration } : trimSourceRange(segment, operation);
+  if (trimmed) Object.assign(segment, trimmed);
+  const { removedLocalTime, duration } = result;
   if (operation.track === "audio") {
     const start = Number(segment.start) || 0;
     updateLinkedCaptionTiming(project, segment.id, -removedLocalTime, start + duration, start);
+    project.audioDuration = getTimedSegmentsEnd(project.audioSegments);
+  }
+}
+
+function duplicateTimed(project, operation) {
+  if (!["audio", "music", "overlays", "stickers"].includes(operation.track)) invalidArgument("Audio, music, overlays or stickers track required");
+  const source = timedClip(project, operation);
+  const id = requireNewClipId(project, operation.newClipId);
+  const offset = ["audio", "overlays"].includes(operation.track) ? 0.2 : source.duration + 0.2;
+  const start = operation.start === undefined
+    ? Math.max(0, Math.min(MAX_TIMELINE_DURATION_SECONDS - source.duration, (source.start || 0) + offset))
+    : finiteNonNegative(operation.start, "start");
+  if (start + source.duration > MAX_TIMELINE_DURATION_SECONDS) invalidArgument("Duplicate exceeds timeline duration limit");
+  const key = TIMED_COLLECTIONS[operation.track];
+  const copy = { ...structuredClone(source), id, start, archiveMediaId: source.archiveMediaId || source.id };
+  if (operation.track === "overlays") {
+    copy.layer = project[key].length + 1;
+    copy.name = `${source.name || "画中画"} 副本`;
+  }
+  project[key].push(copy);
+  if (operation.track === "audio") {
+    const captions = (project.captionSegments || []).filter(item => item.audioSegmentId === source.id);
+    const ids = operation.captionCopies || [];
+    if (!Array.isArray(ids) || ids.length !== captions.length || new Set(ids.map(item => item.clipId)).size !== captions.length) invalidArgument("Provide exactly one captionCopies entry per linked caption");
+    const copies = captions.map(caption => {
+      const target = ids.find(item => item.clipId === caption.id);
+      if (!target) invalidArgument("Missing linked caption copy ID");
+      const captionId = requireNewClipId(project, target.newClipId);
+      const delta = start - source.start;
+      return { ...structuredClone(caption), id: captionId, audioSegmentId: id, start: caption.start + delta, end: caption.end + delta };
+    });
+    if (new Set(copies.map(item => item.id)).size !== copies.length) invalidArgument("Duplicate linked caption copy ID");
+    project.captionSegments = [...(project.captionSegments || []), ...copies].sort((a, b) => (a.start || 0) - (b.start || 0));
+    if (copies.length) project.script = project.captionSegments.map(caption => caption.text).join("\n");
+    project.audioDuration = getTimedSegmentsEnd(project.audioSegments);
+  } else if (operation.captionCopies?.length) invalidArgument("captionCopies requires an audio track");
+  if (operation.track === "music") project.musicStart = Math.min(...project.musicSegments.map(item => item.start));
+}
+
+function splitTimed(project, operation) {
+  if (!["audio", "music", "overlays", "stickers"].includes(operation.track)) invalidArgument("Audio, music, overlays or stickers track required");
+  const source = timedClip(project, operation);
+  const rightId = requireNewClipId(project, operation.rightClipId);
+  const at = finiteNonNegative(operation.at, "at");
+  if (operation.track === "stickers") {
+    if (at <= source.start + 0.35 || at >= source.start + source.duration - 0.35) invalidArgument("Cut must leave more than 0.35 seconds on each side");
+    const left = { ...source, duration: at - source.start };
+    const right = { ...source, id: rightId, start: at, duration: source.start + source.duration - at };
+    project.stickerSegments.splice(project.stickerSegments.findIndex(item => item.id === source.id), 1, left, right);
+    return;
+  }
+  if (source.reversed || source.reverse) invalidArgument("Unsupported source timing");
+  const overlay = operation.track === "overlays";
+  if (overlay && Object.values(source.propertyKeyframes || {}).some(frames => frames?.length)) invalidArgument("Unsupported property keyframes");
+  if (overlay) {
+    if (at - source.start < MIN_VISUAL_SEGMENT_SECONDS || source.start + source.duration - at < MIN_VISUAL_SEGMENT_SECONDS) invalidArgument("Cut is too close to the overlay edge");
+  } else if (at <= source.start + 0.05 || at >= source.start + source.duration - 0.05) invalidArgument("Cut must leave more than 0.05 seconds on each side");
+  const [left, right] = overlay ? splitOverlaySegmentState(source, at) : splitAudioSegmentState(source, at);
+  right.id = rightId;
+  const key = TIMED_COLLECTIONS[operation.track];
+  project[key].splice(project[key].findIndex(item => item.id === source.id), 1, left, right);
+  if (operation.track === "audio") {
+    project.captionSegments = (project.captionSegments || []).map(caption => {
+      if (caption.audioSegmentId !== source.id || caption.end <= at) return caption;
+      if (caption.start < at) invalidArgument("Split the crossing caption before splitting its audio");
+      return { ...caption, audioSegmentId: rightId };
+    });
     project.audioDuration = getTimedSegmentsEnd(project.audioSegments);
   }
 }
@@ -238,19 +342,13 @@ function splitVisual(project, operation) {
   const rightClipId = typeof operation.rightClipId === "string" ? operation.rightClipId.trim() : "";
   if (!rightClipId) throw Object.assign(new Error("rightClipId is required"), { code: "INVALID_ARGUMENT" });
   requireNewClipId(project, rightClipId);
-  const rate = segment.type === "video" ? visualPlaybackRate(segment) : 1;
   const archiveMediaId = segment.archiveMediaId || segment.id;
-  const left = { ...segment, archiveMediaId, duration: at };
-  const right = { ...segment, id: rightClipId, archiveMediaId, duration: duration - at };
-  if (segment.type === "video") {
-    left.sourceDuration = at * rate;
-    right.sourceStart = Math.max(0, Number(segment.sourceStart) || 0) + at * rate;
-    right.sourceDuration = (duration - at) * rate;
+  if (segment.reversed || segment.reverse || Object.values(segment.propertyKeyframes || {}).some(frames => frames?.length)) {
+    throw Object.assign(new Error("Unsupported visual source timing"), { code: "UNSUPPORTED_TIMING" });
   }
-  if (Array.isArray(segment.keyframes)) {
-    left.keyframes = remapKeyframes(segment.keyframes, 0, at);
-    right.keyframes = remapKeyframes(segment.keyframes, at, duration);
-  }
+  const [left, right] = splitVisualSegmentState(segment, at, duration - at);
+  Object.assign(left, { id: segment.id, archiveMediaId });
+  Object.assign(right, { id: rightClipId, archiveMediaId });
   project.visualSegments = [...visuals.slice(0, index), left, right, ...visuals.slice(index + 1)];
 }
 
@@ -481,6 +579,26 @@ function setTransition(project, operation) {
   visuals[index].transition = { id: operation.transitionId, duration: Math.min(duration, maximum) };
 }
 
+function importSrtCaptions(project, operation) {
+  if (typeof operation.text !== "string" || new TextEncoder().encode(operation.text).length > MAX_SRT_FILE_BYTES
+    || !["append", "replace"].includes(operation.mode)) invalidArgument("Invalid SRT content or import mode");
+  const parsed = parseSrt(operation.text);
+  if (!parsed.captions.length) invalidArgument("SRT contains no valid captions");
+  const imported = parsed.captions.map((caption, index) => ({ ...caption, id: `srt-${operation.id}-${index}` }));
+  for (const caption of imported) requireNewClipId(project, caption.id);
+  project.captionSegments = operation.mode === "append"
+    ? appendImportedCaptions(materializeProjectCaptionTimings(project).captionSegments, imported) : imported;
+  project.script = project.captionSegments.map(caption => caption.text).join("\n");
+  project.captionsEnabled = true;
+  project.trackVisibility = { ...project.trackVisibility, caption: true };
+  return { warnings: [{ code: "srtImportPreview", count: imported.length, skipped: parsed.skipped }] };
+}
+
+function setCaptionsEnabled(project, operation) {
+  if (typeof operation.enabled !== "boolean") invalidArgument("enabled must be a boolean");
+  project.captionsEnabled = operation.enabled;
+}
+
 function updateCaption(project, operation) {
   project.captionSegments = materializeProjectCaptionTimings(project).captionSegments;
   const caption = findById(project.captionSegments, operation.clipId, "Caption clip");
@@ -490,8 +608,38 @@ function updateCaption(project, operation) {
   }
   if (Object.hasOwn(operation, "start")) caption.start = finiteNonNegative(operation.start, "start");
   if (Object.hasOwn(operation, "end")) caption.end = finiteNonNegative(operation.end, "end");
+  if (Object.hasOwn(operation, "hidden")) {
+    if (typeof operation.hidden !== "boolean") invalidArgument("hidden must be a boolean");
+    caption.hidden = operation.hidden;
+  }
   requireCaptionRange(caption.start, caption.end);
   project.script = (project.captionSegments || []).map((item) => item.text).join("\n");
+}
+
+function duplicateCaption(project, operation) {
+  project.captionSegments = materializeProjectCaptionTimings(project).captionSegments;
+  const source = findById(project.captionSegments, operation.clipId, "Caption clip");
+  const id = requireNewClipId(project, operation.newClipId);
+  const index = project.captionSegments.indexOf(source);
+  let fontId = project.captionStyle?.fontId || "default";
+  for (const caption of project.captionSegments.slice(0, index + 1)) fontId = caption.fontId || fontId;
+  const copy = { ...structuredClone(source), id, fontId, text: `${source.text} 副本` };
+  project.captionSegments.splice(index + 1, 0, copy);
+  project.script = project.captionSegments.map(item => item.text).join("\n");
+}
+
+function splitCaption(project, operation) {
+  project.captionSegments = materializeProjectCaptionTimings(project).captionSegments;
+  const source = findById(project.captionSegments, operation.clipId, "Caption clip");
+  const rightId = requireNewClipId(project, operation.rightClipId);
+  const at = finiteNonNegative(operation.at, "at");
+  if (at <= source.start + MIN_TIMED_CAPTION_SECONDS || at >= source.end - MIN_TIMED_CAPTION_SECONDS) invalidArgument("Caption cut must leave more than 0.2 seconds on each side");
+  const [left, right] = splitCaptionSegmentState(source, at);
+  left.id = source.id;
+  right.id = rightId;
+  const index = project.captionSegments.findIndex(item => item.id === source.id);
+  project.captionSegments.splice(index, 1, left, right);
+  project.script = project.captionSegments.map(item => item.text).join("\n");
 }
 
 function addCaption(project, operation) {
@@ -588,6 +736,56 @@ function setCaptionStyle(project, operation) {
   });
 }
 
+function saveCaptionStylePreset(project, operation) {
+  const caption = captionEditScope(project, operation);
+  if (typeof operation.name !== "string" || !operation.name.trim() || operation.name.length > 240) invalidArgument("Caption preset name is required (maximum 240 characters)");
+  const id = `caption-style-${operation.id}`;
+  if ((project.captionStylePresets || []).some(preset => preset.id === id)) invalidArgument("Caption preset already exists");
+  const style = caption ? resolveCaptionStyleForSegment(project.captionStyle, caption) : project.captionStyle;
+  const size = caption ? resolveCaptionSizeForSegment(project.captionSize, caption) : project.captionSize;
+  const preset = buildCaptionPresetSnapshot(operation.name.trim(), style, size, id);
+  project.captionStylePresets = [...(project.captionStylePresets || []), preset];
+  if (!caption) project.captionStylePresetId = preset.id;
+}
+
+function applyCaptionStylePreset(project, operation) {
+  const caption = captionEditScope(project, operation);
+  const preset = getCaptionStylePreset(operation.presetId)
+    || (project.captionStylePresets || []).find(item => item.id === operation.presetId);
+  if (!preset) invalidArgument("Caption style preset not found");
+  if (caption) {
+    caption.styleOverrides = {
+      ...(caption.styleOverrides || {}),
+      ...Object.fromEntries(CAPTION_VISUAL_STYLE_KEYS.map(key => [key, preset.style?.[key] ?? project.captionStyle?.[key]]).filter(([, value]) => value !== undefined)),
+      captionSize: preset.captionSize,
+    };
+  } else {
+    project.captionStyle = applyCaptionPresetToStyle(project.captionStyle, preset);
+    project.captionSize = preset.captionSize;
+    project.captionStylePresetId = preset.id;
+    project.captionSegments = (project.captionSegments || []).map(({ styleOverrides: _styleOverrides, fontId: _fontId, ...caption }) => caption);
+  }
+}
+
+function resetCaptionOverrides(project, operation) {
+  const caption = findById(project.captionSegments, operation.clipId, "Caption clip");
+  const property = operation.property;
+  if (property !== undefined && property !== "placement" && !Object.hasOwn(CAPTION_STYLE_PROPERTY_SCHEMA, property)) invalidArgument("Unsupported caption override property");
+  if (property === undefined) {
+    delete caption.placement;
+    delete caption.styleOverrides;
+    delete caption.fontId;
+  } else if (property === "placement") {
+    delete caption.placement;
+  } else {
+    const overrides = { ...(caption.styleOverrides || {}) };
+    delete overrides[property];
+    if (Object.keys(overrides).length) caption.styleOverrides = overrides;
+    else delete caption.styleOverrides;
+    if (property === "fontId") delete caption.fontId;
+  }
+}
+
 function captionPlacement(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)
     || Object.keys(value).some((key) => !["x", "y"].includes(key))
@@ -616,15 +814,77 @@ function syncCaptionPosition(project, operation) {
   setSharedCaptionPlacement(project, caption.placement || project.captionPlacement || { x: 50, y: 78 });
 }
 
-function setOverlayTransform(project, operation) {
-  const clip = findById(project.visualOverlaySegments, operation.clipId, "Overlay clip");
+export const STICKER_TRANSFORM_PROPERTY_SCHEMA = Object.freeze({
+  x: { type: "number", minimum: 0, maximum: 100 },
+  y: { type: "number", minimum: 0, maximum: 100 },
+  scale: { type: "number", minimum: 0.2, maximum: 3 },
+  rotation: { type: "number", minimum: -180, maximum: 180 },
+  opacity: { type: "number", minimum: 0, maximum: 1 },
+});
+
+function addSticker(project, operation) {
+  const id = requireNewClipId(project, operation.clipId);
+  const asset = STICKER_LIBRARY.find(item => item.id === operation.stickerId);
+  if (!asset) invalidArgument("Unknown built-in sticker");
+  const start = finiteNonNegative(operation.start, "start");
+  const duration = operation.duration === undefined ? DEFAULT_STICKER_SEGMENT_SECONDS : operation.duration;
+  if (typeof duration !== "number" || !Number.isFinite(duration) || duration < MIN_VISUAL_SEGMENT_SECONDS || start + duration > MAX_TIMELINE_DURATION_SECONDS) invalidArgument("Invalid sticker range");
+  project.stickerSegments = [...(project.stickerSegments || []), { ...createStickerSegment(asset, start, duration), id }];
+  if (operation.transform !== undefined) setStickerTransform(project, { ...operation, transform: operation.transform });
+}
+
+function setStickerTransform(project, operation) {
+  const clip = findById(project.stickerSegments, operation.clipId, "Sticker clip");
+  const transform = operation.transform;
+  if (!transform || typeof transform !== "object" || Array.isArray(transform) || !Object.keys(transform).length) invalidArgument("Sticker transform requires at least one property");
+  for (const [key, value] of Object.entries(transform)) {
+    const limits = Object.hasOwn(STICKER_TRANSFORM_PROPERTY_SCHEMA, key) ? STICKER_TRANSFORM_PROPERTY_SCHEMA[key] : null;
+    if (!limits || typeof value !== "number" || !Number.isFinite(value) || value < limits.minimum || value > limits.maximum) invalidArgument("Invalid sticker transform");
+  }
+  for (const [key, value] of Object.entries(transform)) clip[key] = Math.round(value * 100) / 100;
+}
+
+function setVisualTransform(project, operation) {
+  const overlay = operation.type === "overlay.set_transform";
+  const clip = findById(overlay ? project.visualOverlaySegments : project.visualSegments, operation.clipId, overlay ? "Overlay clip" : "Visual clip");
   const transform = operation.transform;
   if (!transform || typeof transform !== "object" || Array.isArray(transform) || !Object.keys(transform).length) invalidArgument("transform must contain at least one supported property");
   for (const [key, value] of Object.entries(transform)) {
     const limits = NUMERIC_CLIP_PROPERTIES[key];
     if (!["x", "y", "scale", "rotation", "opacity"].includes(key) || typeof value !== "number" || !Number.isFinite(value) || value < limits.min || value > limits.max) invalidArgument(`Invalid overlay transform property: ${key}`);
   }
-  clip.baseTransform = { x: 27, y: -24, scale: 0.34, rotation: 0, opacity: 1, ...(clip.baseTransform || {}), ...transform };
+  clip.baseTransform = normalizeVisualTransform({ ...(overlay ? { x: 27, y: -24, scale: 0.34 } : {}), ...(clip.baseTransform || {}), ...transform });
+}
+
+function setLinkedSourceVolume(project, operation) {
+  const volume = operation.volume;
+  if (typeof volume !== "number" || !Number.isFinite(volume) || volume < 0 || volume > 4) invalidArgument("Invalid linked source volume");
+  if (project.sourceAudioLinked === false || !(project.sourceAudioDuration > 0)
+    || !getLinkedSourceAudioSegments(project.visualSegments, project.sourceAudioAssetId, project.sourceAudioDuration).some(clip => clip.id === operation.clipId)) invalidArgument("Linked source clip is unavailable");
+  findById(project.visualSegments, operation.clipId, "Visual clip").sourceAudioVolume = volume;
+}
+
+function setSourceAudioSettings(project, operation) {
+  if (!(project.sourceAudioDuration > 0)) invalidArgument("Source audio is unavailable");
+  const settings = operation.settings;
+  if (!settings || typeof settings !== "object" || Array.isArray(settings) || !Object.keys(settings).length
+    || Object.keys(settings).some(key => !["volume", "spatialEffect", "spatialAmount"].includes(key))) invalidArgument("Invalid source audio settings");
+  if (Object.hasOwn(settings, "volume") && (typeof settings.volume !== "number" || !Number.isFinite(settings.volume) || settings.volume < 0 || settings.volume > 4)) invalidArgument("Invalid source audio volume");
+  if (Object.hasOwn(settings, "spatialAmount") && (typeof settings.spatialAmount !== "number" || !Number.isFinite(settings.spatialAmount) || settings.spatialAmount < 0 || settings.spatialAmount > 1)) invalidArgument("Invalid source spatial amount");
+  if (Object.hasOwn(settings, "spatialEffect") && !AUDIO_SPATIAL_EFFECTS.some(effect => effect.id === settings.spatialEffect)) invalidArgument("Invalid source spatial effect");
+  if (Object.hasOwn(settings, "volume")) project.sourceAudioVolume = settings.volume;
+  if (Object.hasOwn(settings, "spatialEffect")) project.sourceAudioSpatialEffect = settings.spatialEffect;
+  if (Object.hasOwn(settings, "spatialAmount")) project.sourceAudioSpatialAmount = settings.spatialAmount;
+}
+
+function setAudioSpatialEffect(project, operation) {
+  const { track, clip } = findClipMatch(project, operation.clipId);
+  if (!["audio", "music"].includes(track)) invalidArgument("Spatial audio requires an audio or music clip");
+  if (!AUDIO_SPATIAL_EFFECTS.some(preset => preset.id === operation.effect)
+    || typeof operation.amount !== "number" || !Number.isFinite(operation.amount)
+    || operation.amount < 0 || operation.amount > 1) invalidArgument("Invalid spatial audio preset or amount");
+  clip.spatialEffect = operation.effect;
+  clip.spatialAmount = operation.amount;
 }
 
 function unlinkCaption(project, operation) {
@@ -668,6 +928,263 @@ const NUMERIC_CLIP_PROPERTIES = Object.freeze({
   layer: { min: 0, max: 1000 },
 });
 
+export const VISUAL_KEYFRAME_PROPERTY_SCHEMA = Object.freeze({
+  ...Object.fromEntries(["x", "y", "scale", "rotation", "opacity"].map(key => [key, {
+    type: "number", minimum: NUMERIC_CLIP_PROPERTIES[key].min, maximum: NUMERIC_CLIP_PROPERTIES[key].max,
+  }])),
+  ...Object.fromEntries(COLOR_GRADE_KEYFRAME_KEYS.map(key => [key, {
+    type: "number", minimum: key.endsWith(".hue") || key.split(".").length === 3 && key.endsWith(".saturation") ? 0 : -100,
+    maximum: key.endsWith(".hue") ? 360 : 100,
+  }])),
+});
+
+export const VISUAL_MASK_PROPERTY_SCHEMA = Object.freeze({
+  type: { type: "string", enum: ["none", "rectangle", "rounded", "circle"] },
+  inverted: { type: "boolean" },
+  feather: { type: "number", minimum: 0, maximum: 40 },
+  centerX: { type: "number", minimum: 0, maximum: 100 },
+  centerY: { type: "number", minimum: 0, maximum: 100 },
+  ...Object.fromEntries(["size", "width", "height"].map(key => [key, { type: "number", minimum: 8, maximum: 100 }])),
+  cornerRadius: { type: "number", minimum: 0, maximum: 50 },
+});
+
+export const SUBJECT_EFFECT_PROPERTY_SCHEMA = Object.freeze({
+  enabled: { type: "boolean" }, targetKind: { type: "string", enum: ["person", "object"] },
+  analysisQuality: { type: "string", enum: ["fast", "balanced", "quality"] },
+  "outline.enabled": { type: "boolean" }, "outline.color": CAPTION_STYLE_PROPERTY_SCHEMA.textColor,
+  "background.visible": { type: "boolean" }, "background.color": CAPTION_STYLE_PROPERTY_SCHEMA.textColor,
+  "background.mode": { type: "string", enum: ["original", "color", "blur"] },
+  "background.fit": { type: "string", enum: ["cover", "contain"] },
+  "material.id": { type: "string", enum: ["paper", "frosted", "halo", "chrome", "impasto", "ink"] },
+  ...Object.fromEntries(Object.entries({
+    "outline.width": [0, 32], "outline.opacity": [0, 1], "outline.softness": [0, 20], "outline.glow": [0, 1], "outline.glowRadius": [0, 60],
+    "material.textureScale": [0.35, 3], "material.textureStrength": [0, 1], "material.irregularity": [0, 1], "material.edgeDensity": [0, 1],
+    "material.grain": [0, 1], "material.diffusion": [0, 1], "material.shadowDepth": [0, 1], "material.relief": [0, 1], "material.bleed": [0, 1], "material.contrast": [0, 1], "material.ringGap": [2, 24],
+    "background.opacity": [0, 1], "background.blur": [0, 80], "background.darken": [0, 1],
+    "edge.feather": [0, 20], "edge.contract": [-20, 20], "edge.decontaminate": [0, 1],
+  }).map(([key, [minimum, maximum]]) => [key, { type: "number", minimum, maximum }])),
+  "material.rings": { type: "integer", minimum: 1, maximum: 3 },
+});
+
+export const CLICK_RIPPLE_PROPERTY_SCHEMA = Object.freeze({
+  enabled: { type: "boolean" }, color: CAPTION_STYLE_PROPERTY_SCHEMA.textColor,
+  meter: { type: "string", enum: ["2/4", "4/4", "3/4", "5/4", "6/8", "7/8", "9/8", "12/8"] },
+  ...Object.fromEntries(Object.entries({ bpm: [30, 180], rippleDuration: [0.01, 1.4], radius: [2, 18], colorAmount: [0, 1], glow: [0, 1] })
+    .map(([key, [minimum, maximum]]) => [key, { type: "number", minimum, maximum }])),
+});
+
+export const CINEMATIC_DEPTH_PROPERTY_SCHEMA = Object.freeze({
+  enabled: { type: "boolean" }, inverted: { type: "boolean" },
+  output: { type: "string", enum: ["cinematic", "depth-map", "relight"] },
+  quality: { type: "string", enum: ["fast", "balanced", "quality"] },
+  "relight.color": { type: "string", pattern: "^#[0-9a-fA-F]{6}$" },
+  ...Object.fromEntries(Object.entries({ focus: [0, 1], focusRange: [0.04, 0.48], blur: [0, 40], highlightBoost: [0, 0.7],
+    "relight.x": [-1, 1], "relight.y": [-1, 1], "relight.strength": [0, 1], "relight.range": [0.1, 1],
+    "relight.softness": [0, 1], "relight.distance": [1, 4] }).map(([key, [minimum, maximum]]) => [key, { type: "number", minimum, maximum }])),
+});
+
+export const PHOTO_PARALLAX_PROPERTY_SCHEMA = Object.freeze({
+  enabled: { type: "boolean" }, quality: CINEMATIC_DEPTH_PROPERTY_SCHEMA.quality,
+  direction: { type: "string", enum: ["horizontal", "vertical", "orbit"] },
+  ...Object.fromEntries(Object.entries({ strength: [0, 1], speed: [0.35, 2], zoom: [1.01, 1.16],
+    foregroundDepth: [0.4, 0.92], backgroundDepth: [0.08, 0.6], edgeFeather: [0.02, 0.24] })
+    .map(([key, [minimum, maximum]]) => [key, { type: "number", minimum, maximum }])),
+});
+
+function setVisualEffectProperty(project, operation) {
+  const { track, clip } = findClipMatch(project, operation.clipId);
+  if (!["visuals", "overlays"].includes(track)) invalidArgument("Effects require a visual clip");
+  const subject = operation.type === "clip.set_subject_effect";
+  const depth = operation.type === "clip.set_cinematic_depth", parallax = operation.type === "clip.set_photo_parallax";
+  if (parallax && clip.type !== "image") invalidArgument("Photo parallax requires an image clip");
+  const schema = depth ? CINEMATIC_DEPTH_PROPERTY_SCHEMA : parallax ? PHOTO_PARALLAX_PROPERTY_SCHEMA : subject ? SUBJECT_EFFECT_PROPERTY_SCHEMA : CLICK_RIPPLE_PROPERTY_SCHEMA;
+  const rule = Object.hasOwn(schema, operation.property) ? schema[operation.property] : null;
+  const value = operation.value;
+  if (!rule || (rule.type === "integer" ? !Number.isInteger(value) : typeof value !== rule.type)
+    || rule.enum && !rule.enum.includes(value)
+    || rule.pattern && !new RegExp(rule.pattern).test(value)
+    || ["number", "integer"].includes(rule.type) && (!Number.isFinite(value) || value < rule.minimum || value > rule.maximum)) invalidArgument("Invalid effect property");
+  const [key, child] = operation.property.split(".");
+  const patch = child ? { [key]: { [child]: value } } : { [key]: value };
+  if (depth) clip.cinematicDepth = normalizeCinematicDepth({ ...clip.cinematicDepth, ...patch,
+    ...(child ? { [key]: { ...clip.cinematicDepth?.[key], ...patch[key] } } : {}) });
+  else if (parallax) clip.photoParallax = normalizePhotoParallax({ ...clip.photoParallax, ...patch });
+  else if (subject) clip.subjectEffect = updateSubjectEffect(clip.subjectEffect, patch);
+  else clip.clickRipple = updateClickRippleEffect(clip.clickRipple, patch);
+}
+
+function applyDepthAnalysis(project, operation) {
+  const { track, clip } = findClipMatch(project, operation.clipId);
+  if (!["visuals", "overlays"].includes(track) || operation.prepared !== true || !operation.preparedDepth) invalidArgument("Depth analysis requires prepared source media");
+  clip.depth = structuredClone(operation.preparedDepth);
+}
+
+function applyVisionCutout(project, operation) {
+  const { track, clip } = findClipMatch(project, operation.clipId);
+  if (!["visuals", "overlays"].includes(track) || clip.type !== "image"
+    || operation.prepared !== true || !operation.preparedVision) invalidArgument("Vision cutout requires a prepared image source");
+  const prepared = structuredClone(operation.preparedVision);
+  clip.vision = { ...clip.vision, ...prepared, options: { ...clip.vision?.options, ...prepared.options } };
+}
+
+function applySubjectBackgroundMedia(project, operation) {
+  const { track, clip } = findClipMatch(project, operation.clipId);
+  if (!["visuals", "overlays"].includes(track) || operation.prepared !== true
+    || !operation.preparedBackground || !["image", "video"].includes(operation.preparedBackground.mode)) {
+    invalidArgument("Subject background requires prepared visual media");
+  }
+  clip.subjectEffect = updateSubjectEffect(clip.subjectEffect, {
+    enabled: true,
+    background: {
+      visible: true,
+      mode: operation.preparedBackground.mode,
+      assetId: operation.preparedBackground.assetId,
+      src: "",
+      fit: operation.preparedBackground.fit,
+      opacity: operation.preparedBackground.opacity,
+    },
+  });
+}
+
+function hasCaptionAvoidanceSubject(vision) {
+  return Boolean(vision?.subject?.box || vision?.samples?.some((sample) => sample?.subject?.box));
+}
+
+function applyCaptionAvoidance(project, operation) {
+  const { track, clip } = findClipMatch(project, operation.clipId);
+  if (!["visuals", "overlays"].includes(track) || operation.prepared !== true
+    || !operation.preparedVision || !hasCaptionAvoidanceSubject(operation.preparedVision)) {
+    invalidArgument("Caption avoidance requires prepared visual analysis");
+  }
+  const prepared = structuredClone(operation.preparedVision);
+  clip.vision = {
+    ...clip.vision,
+    ...prepared,
+    kind: prepared.kind === "video-timeline" ? prepared.kind : clip.vision?.kind || prepared.kind,
+    options: { ...clip.vision?.options, ...prepared.options, avoidCaptions: true },
+  };
+}
+
+function setCaptionAvoidance(project, operation) {
+  const { track, clip } = findClipMatch(project, operation.clipId);
+  if (!["visuals", "overlays"].includes(track) || typeof operation.enabled !== "boolean"
+    || !clip.vision || operation.enabled && !hasCaptionAvoidanceSubject(clip.vision)) {
+    invalidArgument("Caption avoidance requires existing subject analysis");
+  }
+  clip.vision = { ...clip.vision, options: { ...clip.vision.options, avoidCaptions: operation.enabled } };
+}
+
+function applySmartFrame(project, operation) {
+  const { track, clip } = findClipMatch(project, operation.clipId);
+  if (!["visuals", "overlays"].includes(track) || !["image", "video"].includes(clip.type)
+    || operation.prepared !== true || !operation.preparedSmartFrame) invalidArgument("Smart Frame requires prepared visual analysis");
+  const smartFrame = normalizeSmartFrame(operation.preparedSmartFrame);
+  if (!smartFrame) invalidArgument("Smart Frame analysis is invalid");
+  clip.smartFrame = smartFrame;
+}
+
+function removeSmartFrame(project, operation) {
+  const { track, clip } = findClipMatch(project, operation.clipId);
+  if (!["visuals", "overlays"].includes(track) || !["image", "video"].includes(clip.type) || !normalizeSmartFrame(clip.smartFrame)) {
+    invalidArgument("An existing Smart Frame is required");
+  }
+  delete clip.smartFrame;
+}
+
+export const VECTOR_DESIGN_PROPERTY_SCHEMA = Object.freeze({
+  paletteEnabled: { type: "boolean" }, shadowEnabled: { type: "boolean" },
+  ...Object.fromEntries(["primary", "secondary", "accent", "outlineColor", "shadowColor"].map(key => [key, CAPTION_STYLE_PROPERTY_SCHEMA.textColor])),
+  ...Object.fromEntries(Object.entries({ opacity: [0, 1], saturation: [0, 240], brightness: [20, 200], contrast: [20, 200], outlineWidth: [0, 12], shadowBlur: [0, 40], shadowX: [-30, 30], shadowY: [-30, 30] })
+    .map(([key, [minimum, maximum]]) => [key, { type: "number", minimum, maximum }])),
+  blendMode: { type: "string", enum: ["source-over", "multiply", "screen", "overlay"] },
+});
+
+export const VECTOR_PART_PROPERTY_SCHEMA = Object.freeze({
+  color: CAPTION_STYLE_PROPERTY_SCHEMA.textColor,
+  shadowEnabled: { type: "boolean" },
+  ...Object.fromEntries(Object.entries({ opacity: [0, 1], strokeWidth: [1, 120], translateX: [-1200, 1200], translateY: [-1200, 1200], scale: [0.1, 5] })
+    .map(([key, [minimum, maximum]]) => [key, { type: "number", minimum, maximum }])),
+});
+
+function setVectorPart(project, operation) {
+  const { track, clip } = findClipMatch(project, operation.clipId);
+  if (!["visuals", "overlays"].includes(track) || !(clip.kind === "vector" || clip.vectorBody)) invalidArgument("Vector part requires a vector clip");
+  const patch = operation.patch;
+  if (!patch || typeof patch !== "object" || Array.isArray(patch) || !Object.keys(patch).length) invalidArgument("Vector part requires at least one property");
+  for (const [key, value] of Object.entries(patch)) {
+    const rule = Object.hasOwn(VECTOR_PART_PROPERTY_SCHEMA, key) ? VECTOR_PART_PROPERTY_SCHEMA[key] : null;
+    if (!rule || typeof value !== rule.type || rule.pattern && !new RegExp(rule.pattern).test(value)
+      || rule.type === "number" && (!Number.isFinite(value) || value < rule.minimum || value > rule.maximum)) invalidArgument("Invalid vector part property");
+  }
+  const document = createEditableVectorDocument(buildVectorDesignPatch(clip, clip.vectorDesign).vectorBody);
+  const part = document.parts.find(item => item.id === operation.partId);
+  if (!document.supported || !part) invalidArgument("Inspect and select an existing vector part");
+  if (patch.color !== undefined && !part.supportsColor || patch.strokeWidth !== undefined && !part.supportsStroke) invalidArgument("Property unsupported by this vector part");
+  clip.vectorBody = updateVectorPart(document.body, part.id, patch).body;
+}
+
+function setVectorDesign(project, operation) {
+  const { track, clip } = findClipMatch(project, operation.clipId);
+  if (!["visuals", "overlays"].includes(track) || !(clip.kind === "vector" || clip.vectorBody)) invalidArgument("Vector design requires a vector clip");
+  const design = operation.design;
+  if (!design || typeof design !== "object" || Array.isArray(design) || !Object.keys(design).length) invalidArgument("Vector design requires at least one property");
+  for (const [key, value] of Object.entries(design)) {
+    const rule = Object.hasOwn(VECTOR_DESIGN_PROPERTY_SCHEMA, key) ? VECTOR_DESIGN_PROPERTY_SCHEMA[key] : null;
+    if (!rule || typeof value !== rule.type || rule.enum && !rule.enum.includes(value)
+      || rule.pattern && !new RegExp(rule.pattern).test(value)
+      || rule.type === "number" && (!Number.isFinite(value) || value < rule.minimum || value > rule.maximum)) invalidArgument("Invalid vector design property");
+  }
+  clip.vectorDesign = normalizeVectorDesign({ ...clip.vectorDesign, ...design });
+}
+
+function setVisualAppearance(project, operation) {
+  const { track, clip } = findClipMatch(project, operation.clipId);
+  if (!["visuals", "overlays"].includes(track)) invalidArgument("Appearance requires a visual clip");
+  if (operation.type === "clip.set_filter") {
+    if (!FILTER_OPTIONS.some(option => option.id === operation.filterId)) invalidArgument("Unknown filter");
+    clip.filterId = operation.filterId;
+  } else if (operation.type === "clip.set_animation") {
+    if (!["in", "out"].includes(operation.phase) || !VISUAL_CLIP_ANIMATION_OPTIONS.some(option => option.id === operation.animationId)
+      || typeof operation.duration !== "number" || !Number.isFinite(operation.duration) || operation.duration < 0.1 || operation.duration > 3) invalidArgument("Invalid clip animation");
+    clip.animation = normalizeVisualClipAnimation({ ...clip.animation, [operation.phase]: { id: operation.animationId, duration: operation.duration } });
+  } else if (operation.type === "clip.set_color_grade") {
+    if (!COLOR_GRADE_KEYFRAME_KEYS.includes(operation.property)) invalidArgument("Unknown color grade property");
+    const limits = VISUAL_KEYFRAME_PROPERTY_SCHEMA[operation.property];
+    if (typeof operation.value !== "number" || !Number.isFinite(operation.value) || operation.value < limits.minimum || operation.value > limits.maximum) invalidArgument("Invalid color grade value");
+    const grade = normalizeColorGrade(clip.colorGrade || {});
+    const [, key, part] = operation.property.split(".");
+    if (part) grade[key][part] = operation.value;
+    else grade[key] = operation.value;
+    clip.colorGrade = normalizeColorGrade(grade);
+  } else {
+    const patch = operation.mask;
+    if (!patch || typeof patch !== "object" || Array.isArray(patch) || !Object.keys(patch).length) invalidArgument("Mask requires at least one property");
+    for (const [key, value] of Object.entries(patch)) {
+      const rule = Object.hasOwn(VISUAL_MASK_PROPERTY_SCHEMA, key) ? VISUAL_MASK_PROPERTY_SCHEMA[key] : null;
+      if (!rule || typeof value !== rule.type || rule.enum && !rule.enum.includes(value)
+        || rule.type === "number" && (!Number.isFinite(value) || value < rule.minimum || value > rule.maximum)) invalidArgument("Invalid mask property");
+    }
+    clip.mask = { ...clip.mask, ...patch };
+  }
+}
+
+function editVisualKeyframe(project, operation) {
+  const { track, clip } = findClipMatch(project, operation.clipId);
+  if (!["visuals", "overlays"].includes(track)) invalidArgument("Keyframes require a visual clip");
+  if (typeof operation.time !== "number" || !Number.isFinite(operation.time) || operation.time < 0 || operation.time > clip.duration) invalidArgument("Keyframe time is outside the clip");
+  const property = operation.property;
+  if (property !== undefined && !Object.hasOwn(VISUAL_KEYFRAME_PROPERTY_SCHEMA, property)) invalidArgument("Unknown keyframe property");
+  if (operation.type === "clip.keyframe_remove") {
+    clip.keyframes = property === undefined ? (clip.keyframes ?? []).filter(frame => Math.abs(frame.time - operation.time) > 0.04)
+      : removeVisualPropertyKeyframe(clip.keyframes, operation.time, property);
+    return;
+  }
+  const limits = VISUAL_KEYFRAME_PROPERTY_SCHEMA[property];
+  if (!limits || typeof operation.value !== "number" || !Number.isFinite(operation.value)
+    || operation.value < limits.minimum || operation.value > limits.maximum) invalidArgument("Invalid keyframe value");
+  clip.keyframes = upsertVisualPropertyKeyframe(clip.keyframes, operation.time, property, operation.value);
+}
+
 function setClipProperty(project, operation) {
   const { clip } = findClipMatch(project, operation.clipId);
   const limits = NUMERIC_CLIP_PROPERTIES[operation.property];
@@ -678,6 +1195,99 @@ function setClipProperty(project, operation) {
   clip[operation.property] = operation.value;
 }
 
+function setVisualSpeedCurve(project, operation) {
+  const { track, clip } = findClipMatch(project, operation.clipId);
+  if (!["visuals", "overlays"].includes(track) || clip.type !== "video") invalidArgument("Speed curves require a video clip");
+  const curve = operation.curve;
+  if (!curve || typeof curve !== "object" || Array.isArray(curve)
+    || Object.keys(curve).some(key => !["smooth", "points"].includes(key))
+    || typeof curve.smooth !== "boolean" || !Array.isArray(curve.points)
+    || curve.points.length < 2 || curve.points.length > 8) invalidArgument("Invalid speed curve");
+  curve.points.forEach((point, index) => {
+    if (!point || typeof point !== "object" || Array.isArray(point)
+      || Object.keys(point).some(key => !["progress", "rate"].includes(key))
+      || !Number.isFinite(point.progress) || point.progress < 0 || point.progress > 1
+      || !Number.isFinite(point.rate) || point.rate < 0.25 || point.rate > 4
+      || index > 0 && point.progress - curve.points[index - 1].progress < 0.005
+      || index === 0 && point.progress !== 0
+      || index === curve.points.length - 1 && point.progress !== 1) invalidArgument("Invalid speed curve point");
+  });
+  Object.assign(clip, updateVisualSegmentSpeedCurve(clip, curve));
+}
+
+export const ENHANCEMENT_PROCESSING_PROPERTIES = {
+  preset: { type: "string", enum: ["auto", "light", "balanced", "strong"] },
+  strength: { type: "number", minimum: 0, maximum: 1 },
+  backend: { type: "string", maxLength: 256 },
+  pipeline: { type: "string", enum: ["webcodecs-stream", "png-ffmpeg-fallback"] },
+  frameRate: { type: "number", minimum: 1, maximum: 60 },
+  reusedFrames: { type: "integer", minimum: 0 }, audioPreserved: { type: "boolean" },
+};
+
+function applyEnhancementAsset(project, operation) {
+  const { track, clip } = findClipMatch(project, operation.clipId);
+  if (!["visuals", "overlays"].includes(track) || !(clip.type === "video" || clip.type === "image" && operation.mode === "nanovsr-644k") || operation.prepared !== true
+    || !operation.preparedEnhancement || !["smart-denoise-drunet", "nanovsr-644k", "remaster-drunet-full"].includes(operation.mode)) invalidArgument("Prepared video enhancement required");
+  const processing = operation.processing;
+  if (processing !== undefined && operation.mode === "nanovsr-644k") {
+    if (!processing || typeof processing !== "object" || Array.isArray(processing)
+      || Object.keys(processing).some(key => !["backend", "frameRate", "totalFrames"].includes(key))
+      || typeof processing.backend !== "string" || processing.backend.length > 256) invalidArgument("Invalid NanoVSR processing details");
+    if (clip.type === "video" ? !Number.isInteger(processing.frameRate) || processing.frameRate < 1 || processing.frameRate > 15
+      || !Number.isSafeInteger(processing.totalFrames) || processing.totalFrames < 1
+      : processing.frameRate !== undefined || processing.totalFrames !== undefined) invalidArgument("Invalid NanoVSR frame metadata");
+  } else if (processing !== undefined) {
+    if (!processing || typeof processing !== "object" || Array.isArray(processing)
+      || Object.keys(processing).some(key => !Object.hasOwn(ENHANCEMENT_PROCESSING_PROPERTIES, key) && key !== "analysis")) invalidArgument("Invalid enhancement processing details");
+    for (const [key, limits] of Object.entries(ENHANCEMENT_PROCESSING_PROPERTIES)) {
+      const value = processing[key];
+      if ((limits.type === "integer" ? !Number.isSafeInteger(value) : typeof value !== limits.type)
+        || typeof value === "number" && (!Number.isFinite(value) || value < limits.minimum || limits.maximum !== undefined && value > limits.maximum)
+        || limits.enum && !limits.enum.includes(value) || limits.maxLength && value.length > limits.maxLength) invalidArgument("Invalid enhancement processing value");
+    }
+    if (processing.analysis !== null && (!processing.analysis || typeof processing.analysis !== "object" || Array.isArray(processing.analysis)
+      || Object.keys(processing.analysis).some(key => !["score", "strength"].includes(key))
+      || ["score", "strength"].some(key => !Number.isFinite(processing.analysis[key]) || processing.analysis[key] < 0 || processing.analysis[key] > 1))) invalidArgument("Invalid enhancement analysis");
+  }
+  clip.enhancement = { ...operation.preparedEnhancement, ...processing };
+  const source = clip.enhancement.processed;
+  for (const key of ["sourceStart", "sourceDuration", "width", "height"]) clip[key] = source[key];
+}
+
+function setEnhancementEnabled(project, operation) {
+  const { track, clip } = findClipMatch(project, operation.clipId);
+  if (!["visuals", "overlays"].includes(track) || typeof operation.enabled !== "boolean" || !clip.enhancement) invalidArgument("An existing visual enhancement is required");
+  const source = operation.enabled ? clip.enhancement.processed : clip.enhancement.original;
+  if (!source) invalidArgument("Enhancement comparison source is unavailable");
+  for (const key of ["sourceStart", "sourceDuration", "width", "height"]) {
+    if (source[key] !== undefined) clip[key] = source[key];
+  }
+  clip.enhancement = { ...clip.enhancement, enabled: operation.enabled };
+}
+
+function setRepairEnabled(project, operation) {
+  const { track, clip } = findClipMatch(project, operation.clipId);
+  if (!["visuals", "overlays"].includes(track) || !["image", "video"].includes(clip.type)
+    || typeof operation.enabled !== "boolean" || clip.repair?.mode !== "migan-256-webgpu") invalidArgument("An existing MI-GAN repair is required");
+  const source = operation.enabled ? clip.repair.processed : clip.repair.original;
+  if (!source) invalidArgument("Repair comparison source is unavailable");
+  for (const key of ["sourceStart", "sourceDuration", "width", "height"]) {
+    if (source[key] !== undefined) clip[key] = source[key];
+  }
+  clip.repair = { ...clip.repair, enabled: operation.enabled };
+}
+
+function applyRepairAsset(project, operation) {
+  const { track, clip } = findClipMatch(project, operation.clipId);
+  if (!["visuals", "overlays"].includes(track) || !["image", "video"].includes(clip.type)
+    || operation.prepared !== true || !operation.preparedRepair) invalidArgument("Prepared visual repair required");
+  const duration = (Number(clip.sourceDuration) || clip.duration * (Number(clip.playbackRate) || 1)) / (Number(clip.playbackRate) || 1);
+  validateMiganRegions(operation.regions, clip.type === "video", duration);
+  clip.repair = { ...operation.preparedRepair, selection: structuredClone(operation.regions[0].selection),
+    regions: operation.regions.map((region, index) => ({ id: `${operation.id}-region-${index}`, start: 0, end: clip.duration, keyframes: [], ...structuredClone(region) })) };
+  for (const key of ["sourceStart", "sourceDuration", "width", "height"]) clip[key] = clip.repair.processed[key];
+}
+
 function setClipSpeed(project, operation) {
   const match = findClipMatch(project, operation.clipId);
   if (match.track === "captions" || match.track === "stickers" || (match.track === "visuals" && match.clip.type !== "video") || (match.track === "overlays" && match.clip.type !== "video")) {
@@ -686,6 +1296,11 @@ function setClipSpeed(project, operation) {
   const speed = finitePositive(operation.speed, "speed");
   if (speed < 0.25 || speed > 4) throw Object.assign(new Error("speed must be between 0.25 and 4"), { code: "INVALID_ARGUMENT" });
   const clip = match.clip;
+  if (["visuals", "overlays"].includes(match.track)) {
+    if (clip.reversed || clip.reverse) throw Object.assign(new Error("Reverse timing requires its original editor"), { code: "UNSUPPORTED_TIMING" });
+    Object.assign(clip, updateVisualSegmentPlaybackRate(clip, speed));
+    return;
+  }
   if (clip.speedCurve?.enabled || clip.reversed || clip.reverse) throw Object.assign(new Error("Complex timing requires its original editor"), { code: "UNSUPPORTED_TIMING" });
   const previousDuration = finitePositive(Number(clip.duration), "clip duration");
   const previousRate = visualPlaybackRate(clip);
@@ -737,8 +1352,13 @@ const TRACK_STATE_KEYS = Object.freeze({
 });
 
 function setTrackState(project, operation, stateKey) {
-  const track = TRACK_STATE_KEYS[operation.track];
+  let track = TRACK_STATE_KEYS[operation.track];
   if (!track) throw Object.assign(new Error(`Unknown track: ${operation.track}`), { code: "TRACK_NOT_FOUND" });
+  if (operation.clipId !== undefined) {
+    if (track !== "audio") invalidArgument("clipId lane targeting requires audio track");
+    const clip = findById(project.audioSegments, operation.clipId, "Audio clip");
+    track = getTimedSegmentLaneStateKey(project.audioSegments, clip.id);
+  }
   const value = operation[stateKey];
   if (typeof value !== "boolean") throw Object.assign(new Error(`${stateKey} must be a boolean`), { code: "INVALID_ARGUMENT" });
   const projectKey = stateKey === "visible" ? "trackVisibility" : "trackLocks";
@@ -869,11 +1489,27 @@ const reducers = {
   "visual.delete": deleteVisual,
   "visual.duplicate": duplicateVisual,
   "overlay.add": addOverlay,
-  "overlay.set_transform": setOverlayTransform,
+  "overlay.set_transform": setVisualTransform,
+  "visual.set_transform": setVisualTransform,
   "transition.set": setTransition,
   "caption.add": addCaption,
+  "caption.import_srt": importSrtCaptions,
+  "caption.set_enabled": setCaptionsEnabled,
   "caption.update": updateCaption,
   "caption.set_style": setCaptionStyle,
+  "caption.apply_preset": applyCaptionStylePreset,
+  "caption.save_preset": saveCaptionStylePreset,
+  "track.set_source_audio": setSourceAudioSettings,
+  "source.set_volume": setLinkedSourceVolume,
+  "sticker.set_transform": setStickerTransform,
+  "clip.set_vector_design": setVectorDesign,
+  "clip.set_vector_part": setVectorPart,
+  "sticker.add": addSticker,
+  "caption.split": splitCaption,
+  "caption.duplicate": duplicateCaption,
+  "timed.split": splitTimed,
+  "timed.duplicate": duplicateTimed,
+  "caption.reset_overrides": resetCaptionOverrides,
   "caption.set_position": setCaptionPosition,
   "caption.sync_position": syncCaptionPosition,
   "caption.delete": (project, operation) => deleteClip(project, { ...operation, track: "caption" }),
@@ -885,7 +1521,30 @@ const reducers = {
   "clip.delete": deleteClip,
   "clip.set_property": setClipProperty,
   "clip.set_speed": setClipSpeed,
+  "clip.set_speed_curve": setVisualSpeedCurve,
+  "clip.set_enhancement_enabled": setEnhancementEnabled,
+  "clip.set_repair_enabled": setRepairEnabled,
+  "clip.apply_repair": applyRepairAsset,
+  "clip.apply_vision_cutout": applyVisionCutout,
+  "clip.set_subject_background_media": applySubjectBackgroundMedia,
+  "clip.apply_caption_avoidance": applyCaptionAvoidance,
+  "clip.set_caption_avoidance": setCaptionAvoidance,
+  "clip.apply_smart_frame": applySmartFrame,
+  "clip.remove_smart_frame": removeSmartFrame,
+  "clip.apply_depth_analysis": applyDepthAnalysis,
+  "clip.apply_enhancement": applyEnhancementAsset,
   "clip.set_muted": setClipMuted,
+  "clip.set_spatial": setAudioSpatialEffect,
+  "clip.keyframe_set": editVisualKeyframe,
+  "clip.keyframe_remove": editVisualKeyframe,
+  "clip.set_filter": setVisualAppearance,
+  "clip.set_animation": setVisualAppearance,
+  "clip.set_color_grade": setVisualAppearance,
+  "clip.set_mask": setVisualAppearance,
+  "clip.set_cinematic_depth": setVisualEffectProperty,
+  "clip.set_photo_parallax": setVisualEffectProperty,
+  "clip.set_subject_effect": setVisualEffectProperty,
+  "clip.set_click_ripple": setVisualEffectProperty,
   "track.set_visibility": (project, operation) => setTrackState(project, operation, "visible"),
   "track.set_locked": (project, operation) => setTrackState(project, operation, "locked"),
   "project.set_ratio": setProjectRatio,
@@ -1058,7 +1717,7 @@ function sameValue(left, right) {
 }
 
 export function diffProjects(beforeProject, afterProject) {
-  const projectFields = ["ratioId", "fitMode", "trackVisibility", "trackLocks", "script", "captionsEnabled", "captionStyle", "captionSize", "captionStylePresetId", "captionPlacement", "captionPosition"]
+  const projectFields = ["ratioId", "fitMode", "trackVisibility", "trackLocks", "script", "captionsEnabled", "captionStyle", "captionSize", "captionStylePresetId", "captionStylePresets", "captionPlacement", "captionPosition", "sourceAudioVolume", "sourceAudioSpatialEffect", "sourceAudioSpatialAmount"]
     .flatMap((field) => sameValue(beforeProject?.[field], afterProject?.[field]) ? [] : [{ field, before: beforeProject?.[field] ?? null, after: afterProject?.[field] ?? null }]);
   const tracks = Object.fromEntries(Object.entries(TRACK_COLLECTIONS).flatMap(([track, key]) => {
     const before = Array.isArray(beforeProject?.[key]) ? beforeProject[key] : [];
@@ -1119,6 +1778,7 @@ export function applyCommandPlan(project, plan) {
   }
   const next = structuredClone(project);
   const appliedOperationIds = [];
+  const warnings = [];
   let operationId = "";
   try {
     // Resolve imported/missing/duplicate IDs once before any marker mutations.
@@ -1129,7 +1789,8 @@ export function applyCommandPlan(project, plan) {
     for (const operation of plan.operations) {
       if (alreadyApplied.has(operation.id)) continue;
       operationId = operation.id;
-      reducers[operation.type](next, operation);
+      const outcome = reducers[operation.type](next, operation);
+      if (outcome?.warnings) warnings.push(...outcome.warnings);
       appliedOperationIds.push(operation.id);
     }
   } catch (error) {
@@ -1145,7 +1806,7 @@ export function applyCommandPlan(project, plan) {
     ok: true,
     revision,
     appliedOperationIds,
-    warnings: [],
+    warnings,
     project: next,
     before: inspectProject(project),
     after: inspectProject(next),

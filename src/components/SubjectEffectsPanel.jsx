@@ -486,6 +486,9 @@ function MaterialEditorDialog({ t, segment, analysis, effect, materialId, onCanc
     [analysis],
   );
   const sample = samples[Math.min(sampleIndex, Math.max(0, samples.length - 1))];
+  const backgroundMediaMode = ["image", "video"].includes(draft.background.mode) && draft.background.src;
+  const backgroundPreviewSrc = backgroundMediaMode ? draft.background.src : segment?.src;
+  const backgroundPreviewType = backgroundMediaMode ? draft.background.mode : segment?.type;
   const updateDraft = (patch) => setDraft((current) => updateSubjectEffect(current, patch));
   const togglePlayback = () => {
     if (playing) {
@@ -543,9 +546,10 @@ function MaterialEditorDialog({ t, segment, analysis, effect, materialId, onCanc
   useEffect(() => {
     const video = backgroundVideoRef.current;
     if (!video || playing || draft.background.visible === false || !Number.isFinite(sample?.time)) return;
-    const nextTime = Math.max(0, Number(sample.time) || 0);
+    const requestedTime = Math.max(0, Number(sample.time) || 0);
+    const nextTime = backgroundMediaMode && video.duration > 0 ? requestedTime % video.duration : requestedTime;
     if (Math.abs(video.currentTime - nextTime) > 0.035) video.currentTime = nextTime;
-  }, [draft.background.visible, playing, sample?.time]);
+  }, [backgroundMediaMode, draft.background.visible, playing, sample?.time]);
 
   useEffect(() => {
     const video = backgroundVideoRef.current;
@@ -554,11 +558,12 @@ function MaterialEditorDialog({ t, segment, analysis, effect, materialId, onCanc
       video.pause();
       return undefined;
     }
-    const startTime = Math.max(0, Number(samples[playbackOriginRef.current.index]?.time) || 0);
+    const requestedTime = Math.max(0, Number(samples[playbackOriginRef.current.index]?.time) || 0);
+    const startTime = backgroundMediaMode && video.duration > 0 ? requestedTime % video.duration : requestedTime;
     if (Math.abs(video.currentTime - startTime) > 0.035) video.currentTime = startTime;
     video.play().catch(() => {});
     return () => video.pause();
-  }, [draft.background.visible, playing, samples]);
+  }, [backgroundMediaMode, draft.background.visible, playing, samples]);
 
   useEffect(() => {
     if (typeof Image === "undefined") return undefined;
@@ -592,18 +597,23 @@ function MaterialEditorDialog({ t, segment, analysis, effect, materialId, onCanc
             </div>
             <div className={`subject-material-preview-frame is-${material.id}`}>
               <SubjectMaterialFilterDefs effect={draft} filterId="subject-material-dialog-filter" />
-              {draft.background.visible !== false && segment?.src ? (
-                segment.type === "video" ? <video
+              {draft.background.visible !== false && backgroundPreviewSrc ? (
+                backgroundPreviewType === "video" ? <video
                   ref={backgroundVideoRef}
                   className="subject-material-preview-source"
-                  src={segment.src}
+                  src={backgroundPreviewSrc}
                   muted
+                  loop={Boolean(backgroundMediaMode)}
                   playsInline
                   preload="auto"
+                  style={{ objectFit: backgroundMediaMode ? draft.background.fit : undefined, opacity: draft.background.opacity }}
                   onLoadedMetadata={(event) => {
-                    event.currentTarget.currentTime = Math.max(0, Number(sample?.time) || 0);
+                    const time = Math.max(0, Number(sample?.time) || 0);
+                    event.currentTarget.currentTime = backgroundMediaMode && event.currentTarget.duration > 0
+                      ? time % event.currentTarget.duration : time;
                   }}
-                /> : <img className="subject-material-preview-source" src={segment.src} alt="" />
+                /> : <img className="subject-material-preview-source" src={backgroundPreviewSrc} alt=""
+                  style={{ objectFit: backgroundMediaMode ? draft.background.fit : undefined, opacity: draft.background.opacity }} />
               ) : null}
               {sample?.cutoutUrl ? <img
                 className="subject-material-preview-cutout"

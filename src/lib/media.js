@@ -17,6 +17,7 @@ import {
   drawCaptionLayout,
   getCaptionTextLayout,
   positionCaptionLayout,
+  resolveCaptionAvoidance,
   resolveCaptionSegmentPlacement,
 } from "./captionLayout.js";
 import { resolveCaptionStyleForSegment } from "./captionFonts.js";
@@ -762,6 +763,19 @@ export function loadVideo(src) {
   });
 }
 
+export async function loadSubjectBackgroundVisual(requestedEffect) {
+  const background = normalizeSubjectEffect(requestedEffect).background;
+  if (background.visible === false || !background.src || !["image", "video"].includes(background.mode)) return null;
+  return background.mode === "video" ? loadVideo(background.src) : loadImage(background.src);
+}
+
+export async function seekSubjectBackgroundVisual(visual, requestedEffect, time) {
+  const background = normalizeSubjectEffect(requestedEffect).background;
+  if (!visual || background.mode !== "video") return;
+  const duration = Number(visual.duration);
+  await seekVideoFrame(visual, duration > 0 ? Math.max(0, Number(time) || 0) % duration : 0);
+}
+
 export function getVisualDimensions(visual) {
   return {
     width: visual.videoWidth || visual.naturalWidth || visual.displayWidth || visual.width || 1,
@@ -882,7 +896,24 @@ function drawVisualUsingLayout(context, visual, layout, isMask = false) {
   );
 }
 
-function drawFittedVisual(context, visual, canvas, fitMode, filter, vision = null, requestedSubjectEffect = null, smartFrameCrop = null) {
+function drawSubjectBackgroundMedia(context, visual, layout, background) {
+  if (!visual) return;
+  const target = layout.drawRect;
+  const fitted = getVisualFitRect(getVisualDimensions(visual), {
+    width: target.width,
+    height: target.height,
+  }, background.fit || "cover");
+  context.save();
+  context.beginPath();
+  context.rect(target.x, target.y, target.width, target.height);
+  context.clip();
+  context.globalAlpha = background.opacity;
+  context.filter = background.darken > 0 ? `brightness(${1 - background.darken})` : "none";
+  context.drawImage(visual, target.x + fitted.x, target.y + fitted.y, fitted.width, fitted.height);
+  context.restore();
+}
+
+function drawFittedVisual(context, visual, canvas, fitMode, filter, vision = null, requestedSubjectEffect = null, smartFrameCrop = null, subjectBackgroundVisual = null) {
   const { width, height } = canvas;
   const visualSize = getVisualDimensions(visual);
   const smartCropRect = smartFrameCrop
@@ -972,6 +1003,8 @@ function drawFittedVisual(context, visual, canvas, fitMode, filter, vision = nul
         context.fillStyle = background.color;
         context.fillRect(layout.drawRect.x, layout.drawRect.y, layout.drawRect.width, layout.drawRect.height);
         context.restore();
+      } else if (background.visible !== false && ["image", "video"].includes(background.mode)) {
+        drawSubjectBackgroundMedia(context, subjectBackgroundVisual, layout, background);
       }
       if (subjectEffect.outline.enabled && subjectEffect.outline.width > 0) {
         const outlineLayer = getVisualEffectsLayers(canvas).mask;
@@ -1183,6 +1216,7 @@ export function drawPreviewFrame(context, visual, canvas, options) {
     visualTime = 0,
     visualOverlays = [],
     visualOverlaySources = [],
+    subjectBackgroundVisual = null,
   } = options;
 
   const { width, height } = canvas;
@@ -1236,7 +1270,7 @@ export function drawPreviewFrame(context, visual, canvas, options) {
     }
     const smartFrameSourceTime = getVisualSourceTime(visualEffects, visualTime);
     const smartFrameCrop = resolveSmartFrameCropAtTime(visualEffects?.smartFrame, smartFrameSourceTime);
-    return drawFittedVisual(targetContext, visual, targetCanvas, fitMode, primaryFilter, vision, visualEffects?.subjectEffect, smartFrameCrop);
+    return drawFittedVisual(targetContext, visual, targetCanvas, fitMode, primaryFilter, vision, visualEffects?.subjectEffect, smartFrameCrop, subjectBackgroundVisual);
   };
   if (usesAlphaMask) {
     const layers = getVisualEffectsLayers(canvas);
@@ -1298,7 +1332,8 @@ export function drawPreviewFrame(context, visual, canvas, options) {
     const nextFilter = transitionId === "blur" ? `${nextBaseFilter === "none" ? "" : nextBaseFilter} blur(${Math.max(0, (1 - amount) * 14)}px)`.trim() : nextBaseFilter;
     const nextSourceTime = getVisualSourceTime(transitionNext.visualEffects, transitionNext.visualTime || 0);
     const nextSmartFrameCrop = resolveSmartFrameCropAtTime(transitionNext.visualEffects?.smartFrame, nextSourceTime);
-    drawFittedVisual(context, transitionNext.visual, canvas, fitMode, nextFilter, transitionNext.vision || null, null, nextSmartFrameCrop);
+    drawFittedVisual(context, transitionNext.visual, canvas, fitMode, nextFilter, transitionNext.vision || null,
+      transitionNext.visualEffects?.subjectEffect, nextSmartFrameCrop, transitionNext.subjectBackgroundVisual || null);
     context.restore();
     if (transitionId === "flash") {
       context.fillStyle = `rgba(255,255,255,${Math.max(0, 1 - Math.abs(amount - 0.5) * 2) * 0.7})`;
@@ -1356,6 +1391,8 @@ export function drawPreviewFrame(context, visual, canvas, options) {
           overlayFilter,
           overlay.vision || null,
           overlay.subjectEffect,
+          null,
+          overlay.subjectBackgroundVisual || null,
         );
       }
       targetContext.restore();
@@ -1634,6 +1671,7 @@ export async function exportBrowserVideo({
         segment,
         visual,
         cutoutVisual,
+        subjectBackgroundVisual: await loadSubjectBackgroundVisual(segment.subjectEffect),
         temporalMaskCache,
         depthCache,
       };
@@ -1675,6 +1713,7 @@ export async function exportBrowserVideo({
               targetWidth: exportWidth,
               targetHeight: exportHeight,
             })),
+        subjectBackgroundVisual: await loadSubjectBackgroundVisual(segment.subjectEffect),
         temporalMaskCache,
         depthCache,
       };
@@ -1925,18 +1964,27 @@ export async function exportBrowserVideo({
     .filter(({ segment }) => timelineTime >= segment.start && timelineTime < segment.start + segment.duration)
     .sort((left, right) => (left.segment.layer || 1) - (right.segment.layer || 1));
   const syncVisualOverlays = (items, timelineTime) => {
-    items.forEach(({ segment, visual, temporalMaskCache }) => {
+    items.forEach(({ segment, visual, subjectBackgroundVisual, temporalMaskCache }) => {
       const sourceTime = segment.type === "video"
         ? getVisualSourceTime(segment, Math.max(0, timelineTime - segment.start))
         : Math.max(0, timelineTime - segment.start);
       const vision = resolveVisionAnalysisAtTime(segment.vision || null, sourceTime);
       if (vision?.cutoutUrl) void temporalMaskCache?.prepare(vision.cutoutUrl);
+      syncSubjectBackgroundVisual(subjectBackgroundVisual, segment.subjectEffect, Math.max(0, timelineTime - segment.start));
       if (segment.type !== "video") return;
       const expectedTime = sourceTime;
       if (!visual.seeking && Math.abs((visual.currentTime || 0) - expectedTime) > 0.12) visual.currentTime = expectedTime;
       visual.playbackRate = getVisualPlaybackRateAtTime(segment, Math.max(0, timelineTime - segment.start));
       visual.play().catch(() => {});
     });
+  };
+  const syncSubjectBackgroundVisual = (visual, effect, time) => {
+    const background = normalizeSubjectEffect(effect).background;
+    if (!visual || background.mode !== "video") return;
+    const duration = Number(visual.duration);
+    const expectedTime = duration > 0 ? Math.max(0, Number(time) || 0) % duration : 0;
+    if (!visual.seeking && Math.abs((visual.currentTime || 0) - expectedTime) > 0.12) visual.currentTime = expectedTime;
+    visual.play().catch(() => {});
   };
   const draw = () => {
     const elapsed = Math.min(totalDuration, (performance.now() - startTime) / 1000);
@@ -1948,6 +1996,7 @@ export async function exportBrowserVideo({
     const { item: visualItem, range: visualRange } = getVisualItemAtTime(timelineTime);
     const localTime = Math.max(0, timelineTime - (visualRange?.start ?? 0));
     const visualSourceTime = syncVideoItem(visualItem, localTime);
+    syncSubjectBackgroundVisual(visualItem.subjectBackgroundVisual, visualItem.segment.subjectEffect, localTime);
     const exportStickers = getStickersAtTime(timelineTime);
     const activeVisualOverlays = getVisualOverlaysAtTime(timelineTime);
     syncVisualOverlays(activeVisualOverlays, timelineTime);
@@ -1962,6 +2011,7 @@ export async function exportBrowserVideo({
         ...item,
         renderSegment: {
           ...item.segment,
+          subjectBackgroundVisual: item.subjectBackgroundVisual,
           ...(vision ? { vision: {
             ...vision,
             options: item.segment.vision?.options || vision.options,
@@ -1984,6 +2034,8 @@ export async function exportBrowserVideo({
       const nextTime = Math.max(0, Number(nextVisualItem.segment.sourceStart) || 0) + transitionProgress * transitionDuration;
       if (!nextVisualItem.visual.seeking && Math.abs(nextVisualItem.visual.currentTime - nextTime) > 0.05) nextVisualItem.visual.currentTime = nextTime;
     }
+    if (nextVisualItem) syncSubjectBackgroundVisual(nextVisualItem.subjectBackgroundVisual,
+      nextVisualItem.segment.subjectEffect, transitionProgress * transitionDuration);
     const resolvedVision = resolveVisionAnalysisAtTime(
       visualItem.segment.vision ?? null,
       visualSourceTime,
@@ -2002,6 +2054,24 @@ export async function exportBrowserVideo({
     const frameDepth = resolvedDepth
       ? getDepthFrame(visualItem.depthCache, resolvedDepth)
       : null;
+    const resolvedCaptionPlacement = resolveCaptionSegmentPlacement(activeCaptionSegment, captionPlacement);
+    const resolvedCaptionSize = resolveCaptionSizeForSegment(captionSize, activeCaptionSegment);
+    const resolvedCaptionStyle = resolveCaptionStyleForSegment(captionStyle, activeCaptionSegment);
+    const resolvedSmartFrameCrop = resolveSmartFrameCropAtTime(visualItem.segment.smartFrame, visualSourceTime);
+    const captionSmartCrop = resolvedSmartFrameCrop?.presentation === "safe-contain" ? null
+      : smartFrameCropToPixels(resolvedSmartFrameCrop, visualItem.segment.smartFrame?.sourceSize || frameVision?.sourceSize);
+    const captionAvoidance = resolveCaptionAvoidance({
+      vision: frameVision,
+      frameSize: canvas,
+      sourceSize: frameVision?.sourceSize || visualItem.segment.smartFrame?.sourceSize,
+      fitMode: resolvedSmartFrameCrop?.presentation === "safe-contain" ? "contain" : resolvedSmartFrameCrop ? "cover" : fitMode,
+      smartCrop: captionSmartCrop,
+      basePlacement: resolvedCaptionPlacement,
+      text: exportCaption,
+      captionSize: resolvedCaptionSize,
+      captionStyle: resolvedCaptionStyle,
+      referenceFrame: captionReferenceSize ?? canvas,
+    });
     drawPreviewFrame(context, exportVisual, canvas, {
       subtitle: exportCaption,
       progress: elapsed / totalDuration,
@@ -2009,9 +2079,9 @@ export async function exportBrowserVideo({
       filter,
       captionsEnabled,
       captionPosition,
-      captionPlacement: resolveCaptionSegmentPlacement(activeCaptionSegment, captionPlacement),
-      captionSize: resolveCaptionSizeForSegment(captionSize, activeCaptionSegment),
-      captionStyle: resolveCaptionStyleForSegment(captionStyle, activeCaptionSegment),
+      captionPlacement: captionAvoidance.placement,
+      captionSize: resolvedCaptionSize,
+      captionStyle: resolvedCaptionStyle,
       captionReferenceSize,
       stickers: exportStickers,
       stickerImages: exportStickers.map((item) => item?.src ? stickerImageMap.get(item.src) : null),
@@ -2020,12 +2090,14 @@ export async function exportBrowserVideo({
         visual: nextVisualItem.cutoutVisual || nextVisualItem.visual,
         visualEffects: nextVisualItem.segment,
         visualTime: transitionProgress * transitionDuration,
+        subjectBackgroundVisual: nextVisualItem.subjectBackgroundVisual,
       } : null,
       transitionProgress,
       vision: frameVision,
       depth: frameDepth,
       visualEffects: visualItem.segment,
       visualTime: localTime,
+      subjectBackgroundVisual: visualItem.subjectBackgroundVisual,
       visualOverlays: renderedVisualOverlays.map(({ segment, renderSegment }) => ({
         ...renderSegment,
         start: segment.start - (visualRange?.start ?? 0),
@@ -2068,6 +2140,7 @@ export async function exportBrowserVideo({
     syncVisualOverlays(finalVisualOverlays, finalTimelineTime);
     const finalLocalTime = Math.max(0, finalTimelineTime - (finalVisualRange?.start ?? 0));
     const finalVisualSourceTime = syncVideoItem(finalVisualItem, finalLocalTime);
+    syncSubjectBackgroundVisual(finalVisualItem.subjectBackgroundVisual, finalVisualItem.segment.subjectEffect, finalLocalTime);
     const finalResolvedVision = resolveVisionAnalysisAtTime(
       finalVisualItem.segment.vision ?? null,
       finalVisualSourceTime,
@@ -2086,19 +2159,34 @@ export async function exportBrowserVideo({
     const finalFrameDepth = finalResolvedDepth
       ? getDepthFrame(finalVisualItem.depthCache, finalResolvedDepth)
       : null;
+    const finalSubtitle = finalSegmentIndex >= 0 && !exportSegments[finalSegmentIndex]?.hidden
+      ? segments[finalSegmentIndex] : "";
+    const finalCaptionSize = resolveCaptionSizeForSegment(captionSize, finalCaptionSegment);
+    const finalCaptionStyle = resolveCaptionStyleForSegment(captionStyle, finalCaptionSegment);
+    const finalSmartFrameCrop = resolveSmartFrameCropAtTime(finalVisualItem.segment.smartFrame, finalVisualSourceTime);
+    const finalCaptionAvoidance = resolveCaptionAvoidance({
+      vision: finalFrameVision,
+      frameSize: canvas,
+      sourceSize: finalFrameVision?.sourceSize || finalVisualItem.segment.smartFrame?.sourceSize,
+      fitMode: finalSmartFrameCrop?.presentation === "safe-contain" ? "contain" : finalSmartFrameCrop ? "cover" : fitMode,
+      smartCrop: finalSmartFrameCrop?.presentation === "safe-contain" ? null
+        : smartFrameCropToPixels(finalSmartFrameCrop, finalVisualItem.segment.smartFrame?.sourceSize || finalFrameVision?.sourceSize),
+      basePlacement: resolveCaptionSegmentPlacement(finalCaptionSegment, captionPlacement),
+      text: finalSubtitle,
+      captionSize: finalCaptionSize,
+      captionStyle: finalCaptionStyle,
+      referenceFrame: captionReferenceSize ?? canvas,
+    });
     drawPreviewFrame(context, finalVisualItem.cutoutVisual || finalVisualItem.visual, canvas, {
-      subtitle:
-        finalSegmentIndex >= 0 && !exportSegments[finalSegmentIndex]?.hidden
-          ? segments[finalSegmentIndex]
-          : "",
+      subtitle: finalSubtitle,
       progress: 1,
       fitMode,
       filter,
       captionsEnabled,
       captionPosition,
-      captionPlacement: resolveCaptionSegmentPlacement(finalCaptionSegment, captionPlacement),
-      captionSize: resolveCaptionSizeForSegment(captionSize, finalCaptionSegment),
-      captionStyle: resolveCaptionStyleForSegment(captionStyle, finalCaptionSegment),
+      captionPlacement: finalCaptionAvoidance.placement,
+      captionSize: finalCaptionSize,
+      captionStyle: finalCaptionStyle,
       captionReferenceSize,
       stickers: finalStickers,
       stickerImages: finalStickers.map((item) => item?.src ? stickerImageMap.get(item.src) : null),
@@ -2107,8 +2195,10 @@ export async function exportBrowserVideo({
       depth: finalFrameDepth,
       visualEffects: finalVisualItem.segment,
       visualTime: finalLocalTime,
+      subjectBackgroundVisual: finalVisualItem.subjectBackgroundVisual,
       visualOverlays: finalVisualOverlays.map(({ segment }) => ({
         ...segment,
+        subjectBackgroundVisual: finalVisualOverlays.find(item => item.segment.id === segment.id)?.subjectBackgroundVisual,
         start: segment.start - (finalVisualRange?.start ?? 0),
       })),
       visualOverlaySources: finalVisualOverlays.map(({ visual }) => visual),
@@ -2142,13 +2232,23 @@ export async function exportBrowserVideo({
     await audioContext?.close().catch(() => {});
     visualItems.forEach((item) => {
       item.temporalMaskCache?.dispose();
+      if (item.subjectBackgroundVisual && item.segment.subjectEffect?.background?.mode === "video") {
+        item.subjectBackgroundVisual.pause();
+        item.subjectBackgroundVisual.removeAttribute("src");
+        item.subjectBackgroundVisual.load();
+      }
       if (item.segment.type === "video") {
         item.visual.pause();
         item.visual.removeAttribute("src");
         item.visual.load();
       }
     });
-    visualOverlayItems.forEach(({ segment, visual }) => {
+    visualOverlayItems.forEach(({ segment, visual, subjectBackgroundVisual }) => {
+      if (subjectBackgroundVisual && segment.subjectEffect?.background?.mode === "video") {
+        subjectBackgroundVisual.pause();
+        subjectBackgroundVisual.removeAttribute("src");
+        subjectBackgroundVisual.load();
+      }
       if (segment.type !== "video") return;
       visual.pause();
       visual.removeAttribute("src");
@@ -2313,13 +2413,14 @@ export async function encodePngFrameSequence({
   audioSourceBlob = null,
   audioStart = 0,
   audioDuration = 0,
+  transparent = false,
 }) {
   return runFfmpegTask(async () => {
     if (signal?.aborted) throw createAbortError("整段增强已取消");
     let ffmpeg = null;
     const id = makeId("remaster");
     const prefix = `${id}-frame`;
-    const outputName = `${id}.mp4`;
+    const outputName = `${id}.${transparent ? "webm" : "mp4"}`;
     const audioInputName = `${id}-audio-source`;
     const frameNames = [];
     const frameBlobs = [];
@@ -2358,15 +2459,16 @@ export async function encodePngFrameSequence({
         "-framerate", String(frameRate),
         "-i", `${prefix}-%06d.png`,
         ...audioArgs,
-        ...(audioSourceBlob instanceof Blob ? ["-map", "0:v:0", "-map", "1:a?", "-c:a", "aac", "-b:a", "192k", "-shortest"] : ["-an"]),
-        "-c:v", "libx264", "-preset", "veryfast",
-        "-crf", "18", "-pix_fmt", "yuv420p", "-movflags", "faststart",
+        ...(audioSourceBlob instanceof Blob ? ["-map", "0:v:0", "-map", "1:a?", "-c:a", transparent ? "libopus" : "aac", "-b:a", "192k", "-shortest"] : ["-an"]),
+        ...(transparent
+          ? ["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-auto-alt-ref", "0", "-b:v", "0", "-crf", "18"]
+          : ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-movflags", "faststart"]),
         outputName,
       ]);
       if (signal?.aborted) throw createAbortError("整段增强已取消");
       const data = await ffmpeg.readFile(outputName);
       onProgress?.({ progress: 99, phaseKey: "remasterPhaseCreateAsset" });
-      return new Blob([data], { type: "video/mp4" });
+      return new Blob([data], { type: transparent ? "video/webm" : "video/mp4" });
     } finally {
       signal?.removeEventListener("abort", abort);
       if (!terminated && ffmpeg) {

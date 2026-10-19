@@ -5,7 +5,7 @@ import ortWasmUrl from "onnxruntime-web/ort-wasm-simd-threaded.asyncify.wasm?url
 import { buildPingPongSchedule, pingPongStep } from "../lib/aiMusicSampling.js";
 import { fetchFirstAvailableModel, mirroredModelFileUrls } from "../lib/modelSources.js";
 
-const MODEL_REVISION = "0b8a05e0bc3511e674b4cb3413d3ef6c48880cdb";
+import { AI_MUSIC_MODEL_REVISION as MODEL_REVISION } from "../lib/aiMusicPrompt.js";
 const LEGACY_BASE = "https://huggingface.co/lsb/stable-audio-3-small-music-onnx/resolve/main";
 const SAMPLE_RATE = 44100;
 const MODEL_CACHE_NAME = "timeline-studio-model-cache-v4";

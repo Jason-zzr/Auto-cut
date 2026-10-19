@@ -8,6 +8,8 @@ import { readScriptObject } from "./storage/scripts.ts";
 import { normalizedBytes, sha256 } from "./storage/records.ts";
 import { WEB_MCP_OPERATION_SCHEMA } from "../../src/lib/webMcpOperationSchema.js";
 import { WEB_MCP_AI_REQUEST_SCHEMA } from "../../src/lib/webMcpAiJobs.js";
+import { GENERATION_REQUEST_SCHEMA } from "../../src/plugins/generation/contract.js";
+import { SILERO_MODEL_SHA256 } from "../../src/config/sileroVad.js";
 
 export function registerExecutionRoutes(app: FastifyInstance, projects: ReturnType<typeof createProjects>,
   pageFor: (request: FastifyRequest) => PageSession, success: (request: FastifyRequest, data: unknown) => unknown, errorEnvelope: unknown) {
@@ -15,14 +17,14 @@ export function registerExecutionRoutes(app: FastifyInstance, projects: ReturnTy
   const planParams = params.extend({ planId: id });
   // Reuse the editor's public parameter schemas at the HTTP boundary. Zod owns
   // persisted envelopes; the editor owns operation and inference parameters.
-  const json = (schema: z.ZodType) => JSON.parse(JSON.stringify(z.toJSONSchema(schema, { target: "draft-7", unrepresentable: "any" })), (key, value) => {
-    if (key === "operations" && value?.type === "array") return { ...value, items: WEB_MCP_OPERATION_SCHEMA };
-    if (key === "request" && value?.anyOf) return { anyOf: [WEB_MCP_AI_REQUEST_SCHEMA, { type: "null" }] };
+  const json = (schema: z.ZodType, parameters = true) => JSON.parse(JSON.stringify(z.toJSONSchema(schema, { target: "draft-7", unrepresentable: "any" })), (key, value) => {
+    if (parameters && key === "operations" && value?.type === "array") return { ...value, items: WEB_MCP_OPERATION_SCHEMA };
+    if (parameters && key === "request" && value?.anyOf) return { anyOf: [WEB_MCP_AI_REQUEST_SCHEMA, GENERATION_REQUEST_SCHEMA, { type: "null" }] };
     if (key === "propertyNames") return undefined;
     return value;
   });
   const responses = (schema: z.ZodType) => ({ 200: json(z.strictObject({ ok: z.literal(true), data: schema,
-    meta: z.strictObject({ requestId: id, protocolVersion: z.literal(1) }) })), "4xx": errorEnvelope, "5xx": errorEnvelope });
+    meta: z.strictObject({ requestId: id, protocolVersion: z.literal(1) }) }), false), "4xx": errorEnvelope, "5xx": errorEnvelope });
   const leases = new Map<string, { page: string; directory: string; expires: number }>();
   const confirmations = new Map<string, { purpose: string; page: string; directory: string; planId: string; revision: number; digest: string; expires: number }>();
   const find = async (page: PageSession, projectId: string, planId: string) => {
@@ -37,7 +39,8 @@ export function registerExecutionRoutes(app: FastifyInstance, projects: ReturnTy
   };
   const view = (record: ExecutionRecord, page: PageSession, directory: string) => ({ ...record,
     attempts: record.attempts.map(attempt => (["running", "cancel_requested"].includes(attempt.status) && !currentExecutor(attempt.attemptId, page, directory))
-      ? { ...attempt, status: "interrupted" as const, error: "Browser executor is no longer available." } : attempt) });
+      ? { ...attempt, status: record.content.steps.find(step => step.stepId === attempt.stepId)?.kind === "plugin"
+        ? "remote_status_unknown" as const : "interrupted" as const, error: "Browser executor is no longer available." } : attempt) });
   app.get<{ Params: { projectId: string } }>("/api/v1/projects/:projectId/plans", {
     schema: { params: json(params), querystring: json(empty), response: responses(z.strictObject({ items: z.array(executionRecord) })) },
   }, async request => {
@@ -59,7 +62,9 @@ export function registerExecutionRoutes(app: FastifyInstance, projects: ReturnTy
   const heartbeat = base.extend({ attemptId: id });
   const complete = heartbeat.extend({ status: z.enum(["succeeded", "failed", "cancelled", "remote_status_unknown", "registration_pending"]),
     operations: executionRecord.shape.attempts.element.shape.operations,
-    resultRefs: executionRecord.shape.attempts.element.shape.resultRefs, error: z.string().max(2000).nullable() });
+    resultRefs: executionRecord.shape.attempts.element.shape.resultRefs,
+    detectionResult: executionRecord.shape.attempts.element.shape.detectionResult,
+    pauseResult: executionRecord.shape.attempts.element.shape.pauseResult, error: z.string().max(2000).nullable() });
   const previewBody = base.extend(executionRecord.shape.proposal.unwrap().shape);
   const application = base.extend({ ...executionRecord.shape.application.unwrap().shape, confirmationId: id });
   const response = z.strictObject({ record: executionRecord, saveId: id, saveStatus: z.enum(["queued", "writing", "failed", "succeeded"]) });
@@ -140,7 +145,9 @@ export function registerExecutionRoutes(app: FastifyInstance, projects: ReturnTy
             const latest = (stepId: string) => record.attempts.findLast(value => value.stepId === stepId);
             if (!target || target.dependsOn.some(id => latest(id)?.status !== "succeeded")) throw new HostError("DEPENDENCY_NOT_READY", 409, "A dependency has not succeeded.");
             const prior = latest(input.stepId);
-            if (prior && ["succeeded", "remote_status_unknown", "registration_pending"].includes(prior.status) || (prior && currentExecutor(prior.attemptId, page, project.files.directory) && ["running", "cancel_requested"].includes(prior.status))) {
+            if (prior && ["succeeded", "remote_status_unknown", "registration_pending"].includes(prior.status)
+              || prior && ["running", "cancel_requested"].includes(prior.status)
+                && (target.kind === "plugin" || currentExecutor(prior.attemptId, page, project.files.directory))) {
               throw new HostError("RESOURCE_BUSY", 409, "This step cannot be resubmitted.");
             }
             if (prior && ["running", "cancel_requested"].includes(prior.status)) { prior.status = "interrupted"; prior.finishedAt = new Date().toISOString(); }
@@ -176,6 +183,30 @@ export function registerExecutionRoutes(app: FastifyInstance, projects: ReturnTy
             }
             if (action === "cancel-requests") target.status = "cancel_requested";
             else {
+              const step = record.content.steps.find(step => step.stepId === target.stepId)!;
+              const detected = input.detectionResult;
+              if (step.kind === "visual_detect" && input.status === "succeeded") {
+                if (!detected || detected.assetId !== step.request?.assetId || detected.sourceTime !== (step.request?.sourceTime ?? 0) ||
+                    input.operations.length || !detected.frameRef || input.resultRefs.length !== 1 ||
+                    input.resultRefs[0]?.kind !== "media" || input.resultRefs[0]?.entityId !== detected.frameRef.entityId || input.resultRefs[0]?.blobId !== detected.frameRef.blobId ||
+                    detected.candidates.some((candidate, index) => candidate.candidateIndex !== index ||
+                      candidate.box.xmax <= candidate.box.xmin || candidate.box.ymax <= candidate.box.ymin)) {
+                  throw new HostError("INVALID_ARGUMENT", 400, "Detection result must match the source and frame of its step.");
+                }
+              } else if (detected) throw new HostError("INVALID_ARGUMENT", 400, "Unexpected detection result.");
+              if (detected) target.detectionResult = detected;
+              const pauses = input.pauseResult;
+              if (step.kind === "pause_detect" && input.status === "succeeded") {
+                if (!pauses || pauses.assetId !== step.request?.assetId || pauses.clipId !== step.request?.clipId ||
+                    pauses.minimum !== (step.request?.minimum ?? 0.8) || pauses.keep !== (step.request?.keep ?? 0.5) ||
+                    pauses.modelSha256 !== SILERO_MODEL_SHA256 || input.operations.length || input.resultRefs.length ||
+                    new Set(pauses.candidates.map(candidate => candidate.id)).size !== pauses.candidates.length ||
+                    pauses.candidates.some((candidate, index) => candidate.end <= candidate.start || candidate.end > pauses.clipDuration ||
+                      index > 0 && candidate.start < pauses.candidates[index - 1].end)) {
+                  throw new HostError("INVALID_ARGUMENT", 400, "Pause result must match its source, model and ordered clip-local ranges.");
+                }
+              } else if (pauses) throw new HostError("INVALID_ARGUMENT", 400, "Unexpected pause result.");
+              if (pauses) target.pauseResult = pauses;
               target.status = input.status; target.operations = input.operations; target.resultRefs = input.resultRefs;
               target.error = input.error; target.finishedAt = new Date().toISOString();
             }

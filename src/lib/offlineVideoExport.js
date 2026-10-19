@@ -16,12 +16,14 @@ import { registerAacEncoder } from "@mediabunny/aac-encoder";
 import { throwIfExportAborted } from "./exportCancellation.js";
 import { resolveCaptionStyleForSegment } from "./captionFonts.js";
 import { resolveCaptionSizeForSegment } from "./captionStyles.js";
-import { resolveCaptionSegmentPlacement } from "./captionLayout.js";
+import { resolveCaptionAvoidance, resolveCaptionSegmentPlacement } from "./captionLayout.js";
 import {
   createTemporalMaskCache,
   drawPreviewFrame,
   loadImage,
+  loadSubjectBackgroundVisual,
   loadVideo,
+  seekSubjectBackgroundVisual,
   seekVideoFrame,
 } from "./media.js";
 import {
@@ -32,6 +34,7 @@ import {
 } from "./timeline.js";
 import { resolveVisionAnalysisAtTime } from "./vision.js";
 import { getVisualSourceTime } from "./visualEffects.js";
+import { resolveSmartFrameCropAtTime, smartFrameCropToPixels } from "./smartFrame.js";
 import { getVectorRenderSource } from "./vectorDesign.js";
 import { hasSubjectEffect } from "./subjectEffects.js";
 import { getGeneratedMediaTags } from "./generatedMediaMetadata.js";
@@ -125,6 +128,7 @@ async function prepareComposition(options) {
     }
     return {
       segment, visual, cutoutVisual,
+      subjectBackgroundVisual: await loadSubjectBackgroundVisual(segment.subjectEffect),
       temporalMaskCache: maskUrls.length ? createTemporalMaskCache(maskUrls) : null,
       depthCache: (segment.depth?.samples || []).length
         ? createTemporalMaskCache([...new Set(segment.depth.samples.map((sample) => sample.depthUrl).filter(Boolean))])
@@ -159,6 +163,7 @@ async function prepareComposition(options) {
       visual: segment.type === "video"
         ? await loadVideo(segment.src)
         : await loadImage(getVectorRenderSource(segment, { targetWidth, targetHeight })),
+      subjectBackgroundVisual: await loadSubjectBackgroundVisual(segment.subjectEffect),
       temporalMaskCache,
       depthCache,
     };
@@ -181,6 +186,7 @@ async function renderCompositionAt(context, canvas, prepared, options, time) {
     sourceTime = Math.min(Math.max(0, (item.visual.duration || 0) - 0.04), sourceTime);
     await seekVideoFrame(item.visual, sourceTime);
   }
+  await seekSubjectBackgroundVisual(item.subjectBackgroundVisual, item.segment.subjectEffect, localTime);
   const vision = resolveVisionAnalysisAtTime(item.segment.vision || null, sourceTime);
   if (vision?.cutoutUrl) await item.temporalMaskCache?.prepare(vision.cutoutUrl);
   const frameVision = vision ? {
@@ -198,6 +204,8 @@ async function renderCompositionAt(context, canvas, prepared, options, time) {
     ? clamp((time - (range.end - transitionDuration)) / transitionDuration, 0, 1) : 0;
   const next = transitionProgress > 0 ? prepared.items[index + 1] : null;
   if (next?.segment.type === "video") await seekVideoFrame(next.visual, getVisualSourceTime(next.segment, transitionProgress * transitionDuration));
+  if (next) await seekSubjectBackgroundVisual(next.subjectBackgroundVisual, next.segment.subjectEffect,
+    transitionProgress * transitionDuration);
   const captionSegments = options.captionSegments?.length ? options.captionSegments : createCaptionSegments(options.text);
   const captionIndex = getSegmentIndexAtTime(captionSegments, time, options.captionTargetDuration || 0);
   const activeCaptionSegment = captionIndex >= 0 ? captionSegments[captionIndex] : null;
@@ -212,6 +220,8 @@ async function renderCompositionAt(context, canvas, prepared, options, time) {
     if (overlay.segment.type === "video") {
       await seekVideoFrame(overlay.visual, Math.min(Math.max(0, (overlay.visual.duration || 0) - 0.04), getVisualSourceTime(overlay.segment, Math.max(0, time - overlay.segment.start))));
     }
+    await seekSubjectBackgroundVisual(overlay.subjectBackgroundVisual, overlay.segment.subjectEffect,
+      Math.max(0, time - overlay.segment.start));
   }
   const renderedOverlayItems = await Promise.all(activeOverlayItems.map(async (overlay) => {
     const sourceTime = overlay.segment.type === "video"
@@ -225,6 +235,7 @@ async function renderCompositionAt(context, canvas, prepared, options, time) {
       ...overlay,
       renderSegment: {
         ...overlay.segment,
+        subjectBackgroundVisual: overlay.subjectBackgroundVisual,
         ...(vision ? { vision: {
           ...vision,
           options: overlay.segment.vision?.options || vision.options,
@@ -234,12 +245,29 @@ async function renderCompositionAt(context, canvas, prepared, options, time) {
       },
     };
   }));
+  const resolvedCaptionPlacement = resolveCaptionSegmentPlacement(activeCaptionSegment, options.captionPlacement);
+  const resolvedCaptionSize = resolveCaptionSizeForSegment(options.captionSize, activeCaptionSegment);
+  const resolvedCaptionStyle = resolveCaptionStyleForSegment(options.captionStyle, activeCaptionSegment);
+  const resolvedSmartFrameCrop = resolveSmartFrameCropAtTime(item.segment.smartFrame, sourceTime);
+  const captionAvoidance = resolveCaptionAvoidance({
+    vision: frameVision,
+    frameSize: canvas,
+    sourceSize: frameVision?.sourceSize || item.segment.smartFrame?.sourceSize,
+    fitMode: resolvedSmartFrameCrop?.presentation === "safe-contain" ? "contain" : resolvedSmartFrameCrop ? "cover" : options.fitMode,
+    smartCrop: resolvedSmartFrameCrop?.presentation === "safe-contain" ? null
+      : smartFrameCropToPixels(resolvedSmartFrameCrop, item.segment.smartFrame?.sourceSize || frameVision?.sourceSize),
+    basePlacement: resolvedCaptionPlacement,
+    text: caption,
+    captionSize: resolvedCaptionSize,
+    captionStyle: resolvedCaptionStyle,
+    referenceFrame: options.captionReferenceSize ?? canvas,
+  });
   drawPreviewFrame(context, frameVisual, canvas, {
     subtitle: caption, fitMode: options.fitMode, filter: options.filter,
     captionsEnabled: options.captionsEnabled, captionPosition: options.captionPosition,
-    captionPlacement: resolveCaptionSegmentPlacement(activeCaptionSegment, options.captionPlacement),
-    captionSize: resolveCaptionSizeForSegment(options.captionSize, activeCaptionSegment),
-    captionStyle: resolveCaptionStyleForSegment(options.captionStyle, activeCaptionSegment),
+    captionPlacement: captionAvoidance.placement,
+    captionSize: resolvedCaptionSize,
+    captionStyle: resolvedCaptionStyle,
     captionReferenceSize: options.captionReferenceSize,
     stickers, stickerImages: stickers.map((sticker) => prepared.stickerImages.get(sticker.src)),
     transitionId: next ? junction.id : "none",
@@ -247,8 +275,10 @@ async function renderCompositionAt(context, canvas, prepared, options, time) {
       visual: next.cutoutVisual || next.visual,
       visualEffects: next.segment,
       visualTime: transitionProgress * transitionDuration,
+      subjectBackgroundVisual: next.subjectBackgroundVisual,
     } : null,
     transitionProgress, vision: frameVision, depth: frameDepth, visualEffects: item.segment, visualTime: localTime,
+    subjectBackgroundVisual: item.subjectBackgroundVisual,
     visualOverlays: renderedOverlayItems.map((item) => ({ ...item.renderSegment, start: item.segment.start - (range?.start || 0) })),
     visualOverlaySources: renderedOverlayItems.map((item) => item.visual),
   });
@@ -259,6 +289,9 @@ function disposeComposition(prepared) {
     item.temporalMaskCache?.dispose();
     item.depthCache?.dispose();
     item.sequentialFrames?.dispose?.();
+    if (item.subjectBackgroundVisual && item.segment.subjectEffect?.background?.mode === "video") {
+      item.subjectBackgroundVisual.pause(); item.subjectBackgroundVisual.removeAttribute("src"); item.subjectBackgroundVisual.load();
+    }
     if (item.segment.type === "video") { item.visual.removeAttribute("src"); item.visual.load(); }
   }
 }

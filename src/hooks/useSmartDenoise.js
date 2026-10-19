@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 
 import { enhanceRemasterClip } from "../lib/remasterClipEnhancement.js";
-import { enhanceRemasterFrame } from "../lib/remasterEnhancement.js";
+import { enhanceRemasterFrame, estimateNoise, REMASTER_MODE_STRENGTH as MODE_STRENGTH } from "../lib/remasterEnhancement.js";
 
-const MODE_STRENGTH = { light: 0.38, balanced: 0.68, strong: 1 };
 const EMPTY_JOB = { running: false, kind: "", progress: 0, phaseKey: "", frameIndex: 0, totalFrames: 0, backend: "" };
 
 function makeName(segment) {
@@ -14,28 +13,6 @@ function revoke(result) {
   if (result?.ownedUrl && result.url) URL.revokeObjectURL(result.url);
 }
 
-function estimateNoise(bitmap) {
-  const width = Math.min(320, bitmap.width);
-  const height = Math.max(2, Math.round(bitmap.height * width / Math.max(1, bitmap.width)));
-  const canvas = new OffscreenCanvas(width, height);
-  const context = canvas.getContext("2d", { willReadFrequently: true });
-  context.drawImage(bitmap, 0, 0, width, height);
-  const data = context.getImageData(0, 0, width, height).data;
-  let residual = 0;
-  let samples = 0;
-  const luma = (index) => data[index] * 0.2126 + data[index + 1] * 0.7152 + data[index + 2] * 0.0722;
-  for (let y = 1; y < height - 1; y += 2) {
-    for (let x = 1; x < width - 1; x += 2) {
-      const index = (y * width + x) * 4;
-      const center = luma(index);
-      const average = (luma(index - 4) + luma(index + 4) + luma(index - width * 4) + luma(index + width * 4)) / 4;
-      residual += Math.min(32, Math.abs(center - average));
-      samples += 1;
-    }
-  }
-  const score = Math.max(0, Math.min(1, residual / Math.max(1, samples) / 13));
-  return { score, strength: Math.max(0.42, Math.min(0.92, 0.42 + score * 0.5)) };
-}
 
 export function useSmartDenoise({ selectedSegment, imageUrlRefs, setVisualSegments, setUserAssets, notify, t }) {
   const [dialogOpen, setDialogOpen] = useState(false);
