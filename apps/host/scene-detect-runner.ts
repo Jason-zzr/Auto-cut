@@ -2,33 +2,34 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { access } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { HostError } from "./sessions.ts";
+import { inspectSceneComponent, verifySceneComponentRuntime } from "./scene-component.ts";
+import { SCENE_DETECT_TOOL_ID, SCENE_DETECT_TOOL_REVISION } from "../../src/config/sceneDetect.js";
 
-export const sceneDetectToolId = "openmontage.scene_detect";
-export const sceneDetectToolRevision = "0.1.0";
+export const sceneDetectToolId = SCENE_DETECT_TOOL_ID;
+export const sceneDetectToolRevision = SCENE_DETECT_TOOL_REVISION;
 
 const protocol = "autocut-tool-jsonl";
 const adapterSource = String.raw`import json
-import os
 import sys
-
-sys.path.insert(0, os.getcwd())
+import time
+from pathlib import Path
 
 try:
-    from tools.analysis.scene_detect import SceneDetect
-    import scenedetect  # noqa: F401
+    from scenedetect import SceneManager, open_video
+    from scenedetect.detectors import ContentDetector
     import_error = None
 except Exception as exc:
-    SceneDetect = None
+    SceneManager = None
     import_error = str(exc)
 
 def emit(value):
     sys.stdout.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
     sys.stdout.flush()
 
-emit({"protocol": "autocut-tool-jsonl", "protocolVersion": 1, "type": "ready", "sequence": 0, "tool": "openmontage.scene_detect"})
+emit({"protocol": "autocut-tool-jsonl", "protocolVersion": 1, "type": "ready", "sequence": 0, "tool": "autocut.scene_detect"})
 started = False
 for line in sys.stdin:
     if not line.strip():
@@ -49,14 +50,27 @@ for line in sys.stdin:
         inputs = message.get("input") or {}
         if inputs.get("method") != "content" or float(inputs.get("threshold")) != 27.0 or float(inputs.get("min_scene_length_seconds")) != 1.0:
             raise RuntimeError("SceneDetect parameters are not the fixed content configuration.")
-        if SceneDetect is None or import_error:
-            raise RuntimeError("PySceneDetect is unavailable in the configured OpenMontage runtime.")
+        if SceneManager is None or import_error:
+            raise RuntimeError("PySceneDetect is unavailable in the configured Auto-cut component.")
+        input_path = Path(inputs["input_path"])
+        output_path = Path(inputs["output_path"])
+        if not input_path.is_file():
+            raise RuntimeError("SceneDetect input is unavailable.")
         emit({"protocol": "autocut-tool-jsonl", "protocolVersion": 1, "type": "progress", "attemptId": attempt_id, "sequence": 1, "phase": "scene-detect", "progress": 0})
-        result = SceneDetect().execute(inputs)
-        if not result.success:
-            emit({"protocol": "autocut-tool-jsonl", "protocolVersion": 1, "type": "error", "attemptId": attempt_id, "sequence": 2, "code": "TOOL_EXECUTION_FAILED", "message": result.error or "SceneDetect failed."})
-        else:
-            emit({"protocol": "autocut-tool-jsonl", "protocolVersion": 1, "type": "result", "attemptId": attempt_id, "sequence": 2, "data": result.data, "artifacts": result.artifacts, "provider": "pyscenedetect", "toolRevision": "0.1.0", "durationSeconds": result.duration_seconds})
+        started_at = time.time()
+        video = open_video(str(input_path))
+        scene_manager = SceneManager()
+        scene_manager.add_detector(ContentDetector(threshold=27.0, min_scene_len=int(video.frame_rate)))
+        scene_manager.detect_scenes(video=video)
+        scenes = []
+        for index, (scene_start, scene_end) in enumerate(scene_manager.get_scene_list()):
+            start_seconds = scene_start.get_seconds()
+            end_seconds = scene_end.get_seconds()
+            scenes.append({"index": index, "start_seconds": round(start_seconds, 3), "end_seconds": round(end_seconds, 3), "duration_seconds": round(end_seconds - start_seconds, 3)})
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps({"scenes": scenes}, ensure_ascii=False, indent=2), encoding="utf-8")
+        data = {"scene_count": len(scenes), "scenes": scenes, "method": "pyscenedetect", "output": str(output_path)}
+        emit({"protocol": "autocut-tool-jsonl", "protocolVersion": 1, "type": "result", "attemptId": attempt_id, "sequence": 2, "data": data, "artifacts": [str(output_path)], "provider": "pyscenedetect", "toolRevision": "0.2.0", "durationSeconds": round(time.time() - started_at, 2)})
     except Exception as exc:
         emit({"protocol": "autocut-tool-jsonl", "protocolVersion": 1, "type": "error", "attemptId": attempt_id, "sequence": 2, "code": "TOOL_EXECUTION_FAILED", "message": str(exc)[:1024]})
     break
@@ -80,20 +94,31 @@ function within(root: string, target: string) {
   return relativePath === "" || (!relativePath.startsWith("..") && !relativePath.includes("\0"));
 }
 
-export function createSceneDetectRunner(openMontageRoot: string | undefined, pythonExecutable = process.env.AUTOCUT_PYTHON) {
-  const root = openMontageRoot || process.env.AUTOCUT_OPENMONTAGE_ROOT;
+export function createSceneDetectRunner(componentRoot?: string, pythonExecutable = process.env.AUTOCUT_PYTHON) {
+  let verified: Promise<{ root: string; pythonExecutable: string }> | undefined;
+  const verify = async () => {
+    if (componentRoot) {
+      const component = await inspectSceneComponent(componentRoot);
+      if (pythonExecutable && resolve(pythonExecutable) !== component.pythonExecutable) throw new Error("Configured Python does not belong to the SceneDetect component.");
+      await verifySceneComponentRuntime(component.pythonExecutable, component.manifest);
+      return { root: component.root, pythonExecutable: component.pythonExecutable };
+    }
+    if (!pythonExecutable || !isAbsolute(pythonExecutable)) throw new Error("An absolute AUTOCUT_PYTHON development override is required.");
+    await access(pythonExecutable, process.platform === "win32" ? constants.R_OK : constants.X_OK);
+    await verifySceneComponentRuntime(pythonExecutable);
+    return { root: dirname(pythonExecutable), pythonExecutable };
+  };
   const requireFiles = async () => {
-    if (!root || !pythonExecutable) throw new HostError("COMPONENT_NOT_READY", 503, "Configure the OpenMontage Python runtime before SceneDetect analysis.");
     try {
-      await access(pythonExecutable, constants.X_OK);
-      await access(join(root, "tools", "analysis", "scene_detect.py"), constants.R_OK);
+      verified ??= verify();
+      return await verified;
     } catch {
-      throw new HostError("COMPONENT_NOT_READY", 503, "The configured OpenMontage SceneDetect runtime is unavailable.");
+      verified = undefined;
+      throw new HostError("COMPONENT_NOT_READY", 503, "The configured Auto-cut SceneDetect component is unavailable or failed verification.");
     }
   };
   return {
     async status() {
-      if (!root || !pythonExecutable) return { state: "missing" as const, toolId: sceneDetectToolId, revision: sceneDetectToolRevision };
       try {
         await requireFiles();
         return { state: "verified" as const, toolId: sceneDetectToolId, revision: sceneDetectToolRevision };
@@ -103,16 +128,16 @@ export function createSceneDetectRunner(openMontageRoot: string | undefined, pyt
     },
     requireFiles,
     async run(request: SceneDetectRun) {
-      await requireFiles();
+      const runtime = await requireFiles();
       if (!within(request.outputDir, request.outputPath) || !isAbsolute(request.inputPath)) {
         throw new HostError("PATH_OUTSIDE_PROJECT", 400, "SceneDetect input or output path is outside its assigned boundary.");
       }
       if (request.signal.aborted) throw new HostError("TASK_CANCELLED", 409, "SceneDetect was cancelled.");
-      const child = spawn(pythonExecutable!, ["-u", "-c", adapterSource], {
-        cwd: root,
+      const child = spawn(runtime.pythonExecutable, ["-I", "-u", "-c", adapterSource], {
+        cwd: runtime.root,
         shell: false,
         stdio: ["pipe", "pipe", "pipe"],
-        env: { PATH: resolve(pythonExecutable!, ".."), PYTHONNOUSERSITE: "1", LC_ALL: "C", LANG: "C" },
+        env: { PATH: dirname(runtime.pythonExecutable), PYTHONNOUSERSITE: "1", PYTHONDONTWRITEBYTECODE: "1", LC_ALL: "C", LANG: "C" },
       });
       let diagnostics = "";
       child.stderr.on("data", chunk => { if (diagnostics.length < 2048) diagnostics += chunk.toString("utf8"); });

@@ -9,11 +9,13 @@ import { createRequire } from "node:module";
 import { buildHost } from "./build-host.mjs";
 import { buildStorage } from "./build-storage.mjs";
 import { inspectWebResources } from "../apps/host/components.ts";
+import { inspectSceneComponent, verifySceneComponentRuntime } from "../apps/host/scene-component.ts";
+import { inspectVisualSearchComponent } from "../apps/host/visual-search-component.ts";
 
 const execute = promisify(execFile);
 const repository = fileURLToPath(new URL("../", import.meta.url));
 const { values } = parseArgs({ options: Object.fromEntries(
-  ["out", "dist", "runtime", "runtime-license", "runtime-source", "runtime-sha256", "mode"].map(name => [name, { type: "string" }])
+  ["out", "dist", "runtime", "runtime-license", "runtime-source", "runtime-sha256", "scene-component", "visual-search-component", "mode"].map(name => [name, { type: "string" }])
 ), strict: true });
 for (const name of ["out", "dist", "runtime", "runtime-license", "runtime-source", "runtime-sha256"]) {
   if (!values[name]) throw new Error(`Missing --${name}. See packaging/README.md.`);
@@ -48,6 +50,10 @@ if (identity.version !== process.versions.node || !identity.version.startsWith("
     identity.platform !== process.platform || identity.arch !== process.arch) {
   throw new Error("Build Node and supplied runtime must have the same Node 24 version, platform and architecture.");
 }
+const sceneComponent = values["scene-component"] ? await inspectSceneComponent(resolve(values["scene-component"])) : null;
+if (sceneComponent) await verifySceneComponentRuntime(sceneComponent.pythonExecutable, sceneComponent.manifest);
+const visualSearchComponent = values["visual-search-component"]
+  ? await inspectVisualSearchComponent(resolve(values["visual-search-component"])) : null;
 await inspectWebResources(dist);
 let postject;
 if (mode === "sea") {
@@ -63,6 +69,14 @@ await buildHost(resources);
 if (mac) await buildStorage(resources);
 await cp(dist, join(resources, "dist"), { recursive: true, errorOnExist: true, force: false });
 await inspectWebResources(join(resources, "dist"));
+if (sceneComponent) {
+  await mkdir(join(resources, "components"), { recursive: true });
+  await cp(sceneComponent.root, join(resources, "components", "scene-detect"), { recursive: true, errorOnExist: true, force: false });
+}
+if (visualSearchComponent) {
+  await mkdir(join(resources, "components"), { recursive: true });
+  await cp(visualSearchComponent.root, join(resources, "components", "visual-search"), { recursive: true, errorOnExist: true, force: false });
+}
 await writeFile(join(resources, "NODE-LICENSE"), runtimeLicense);
 const appPackage = JSON.parse(await readFile(join(repository, "package.json"), "utf8"));
 const executable = mac ? join(application, "Contents", "MacOS", "Auto-cut") : join(application, "Auto-cut.exe");
@@ -125,6 +139,13 @@ async function inventory(directory) {
 await inventory(application);
 await writeFile(join(output, "package-manifest.json"), JSON.stringify({
   product: "Auto-cut", version: appPackage.version, mode, runtime: { ...identity, source: source.href, sha256: runtimeDigest },
+  sceneComponent: sceneComponent ? { id: sceneComponent.manifest.componentId, revision: sceneComponent.manifest.componentRevision,
+    toolId: sceneComponent.manifest.toolId, toolRevision: sceneComponent.manifest.toolRevision,
+    pythonVersion: sceneComponent.manifest.python.version, packages: sceneComponent.manifest.packages } : null,
+  visualSearchComponent: visualSearchComponent ? { id: visualSearchComponent.manifest.componentId,
+    revision: visualSearchComponent.manifest.componentRevision, toolId: visualSearchComponent.manifest.toolId,
+    toolRevision: visualSearchComponent.manifest.toolRevision, pythonVersion: visualSearchComponent.manifest.python.version,
+    model: visualSearchComponent.manifest.model, packages: visualSearchComponent.manifest.packages } : null,
   signing: "not-performed", files,
 }, null, 2) + "\n");
 console.log(`Package prepared at ${application}. Signing, installation and platform acceptance remain separate.`);

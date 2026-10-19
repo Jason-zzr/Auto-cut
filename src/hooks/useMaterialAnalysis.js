@@ -7,7 +7,7 @@ export function useMaterialAnalysis({ hostSession, getContext, isEditorBusy }) {
   const latest = useRef({ getContext, isEditorBusy });
   latest.current = { getContext, isEditorBusy };
   const controller = useRef(null), pending = useRef(null), active = useRef(null);
-  const [state, setState] = useState({ running: false, phase: "", error: "", tasks: [], pendingSave: null });
+  const [state, setState] = useState({ running: false, phase: "", error: "", tasks: [], pendingSave: null, pendingSaveKind: null });
   const trusted = event => { if (!event?.isTrusted) throw new Error("请从素材分析面板直接操作。"); };
   const context = async () => {
     if (!hostSession || hostSession.getSnapshot().connection === "draining") throw new Error("本地服务正在退出。");
@@ -20,7 +20,9 @@ export function useMaterialAnalysis({ hostSession, getContext, isEditorBusy }) {
   };
   const refresh = async () => {
     const result = await request("analysis-tasks");
-    setState(old => ({ ...old, tasks: result.items, pendingSave: result.pendingSaves?.[0]?.saveId ?? null }));
+    setState(old => ({ ...old, tasks: result.items,
+      pendingSave: result.pendingSaves?.[0]?.saveId ?? (old.pendingSaveKind === "semantic" ? old.pendingSave : null),
+      pendingSaveKind: result.pendingSaves?.[0]?.saveId ? "analysis" : old.pendingSaveKind === "semantic" ? "semantic" : null }));
     return result.items;
   };
   const saveOperation = async (taskId, operation) => {
@@ -30,7 +32,7 @@ export function useMaterialAnalysis({ hostSession, getContext, isEditorBusy }) {
     const result = await request(path, { operation }, key, { signal: AbortSignal.timeout(300_000) });
     pending.current = null;
     if (result.saveStatus !== "succeeded") {
-      setState(old => ({ ...old, pendingSave: result.saveId }));
+      setState(old => ({ ...old, pendingSave: result.saveId, pendingSaveKind: "analysis" }));
       throw Object.assign(new Error(result.error?.message || "分析保存尚未确认，请补登记后继续。"), { code: "ANALYSIS_SAVE_PENDING" });
     }
     return result;
@@ -113,6 +115,18 @@ export function useMaterialAnalysis({ hostSession, getContext, isEditorBusy }) {
     get unresolved() { return Boolean(pending.current); },
     refresh,
     list: async (assetId, cursor) => request(`analyses?assetId=${encodeURIComponent(assetId)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
+    semanticList: async (assetId, cursor) => request(`semantic-analyses?assetId=${encodeURIComponent(assetId)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
+    visualStatus: () => request("visual-search"),
+    visualQuery: input => request("visual-search/queries", input, undefined, { signal: AbortSignal.timeout(300_000) }),
+    async buildVisualIndex(event) {
+      trusted(event);
+      if (!window.confirm("为当前已保存镜头区间建立本机视觉检索缓存？只读取项目视频并写入可重建机器缓存，不上传媒体或修改脚本/时间线。")) return null;
+      return request("visual-search/indexes", {}, crypto.randomUUID(), { signal: AbortSignal.timeout(30 * 60_000) });
+    },
+    async cancelVisualIndex(event) {
+      trusted(event);
+      return request("visual-search/cancel", {}, crypto.randomUUID(), { signal: AbortSignal.timeout(300_000) });
+    },
     async source(asset) { const current = await context(); return projectMediaUrl(current.projectId, asset.mediaRef); },
     async start(event, selection) {
       trusted(event);
@@ -120,7 +134,7 @@ export function useMaterialAnalysis({ hostSession, getContext, isEditorBusy }) {
       if (!window.confirm(`分析选中的 ${selection.inputs.length} 项素材能力与源区间？结果保存到完整项目。${selection.force ? "本次重新分析，保留旧结果和修订。" : "同依据的完整结果将复用。"}`)) return;
       const approval = await request("analysis-confirmations", selection);
       const result = await request("analysis-runs", { ...selection, confirmationId: approval.confirmationId }, crypto.randomUUID());
-      if (result.saveStatus !== "succeeded") { setState(old => ({ ...old, pendingSave: result.saveId })); throw new Error("分析任务保存未完成。"); }
+      if (result.saveStatus !== "succeeded") { setState(old => ({ ...old, pendingSave: result.saveId, pendingSaveKind: "analysis" })); throw new Error("分析任务保存未完成。"); }
       await refresh(); void run(result.taskId).catch(error => setState(old => ({ ...old, error: error.message })));
     },
     async continueTask(event, taskId, stepId) {
@@ -138,7 +152,13 @@ export function useMaterialAnalysis({ hostSession, getContext, isEditorBusy }) {
       trusted(event);
       const result = await request(`analyses/${encodeURIComponent(analysisId)}/revisions`, { expectedRevision, correction }, crypto.randomUUID(),
         { signal: AbortSignal.timeout(300_000) });
-      if (result.saveStatus !== "succeeded") { setState(old => ({ ...old, pendingSave: result.saveId })); throw new Error("修订保存未完成，原结果仍保留。"); }
+      if (result.saveStatus !== "succeeded") { setState(old => ({ ...old, pendingSave: result.saveId, pendingSaveKind: "analysis" })); throw new Error("修订保存未完成，原结果仍保留。"); }
+    },
+    async correctSemantic(event, analysisId, expectedRevision, content) {
+      trusted(event);
+      const result = await request(`semantic-analyses/${encodeURIComponent(analysisId)}/revisions`, { expectedRevision, content }, crypto.randomUUID(),
+        { signal: AbortSignal.timeout(300_000) });
+      if (result.saveStatus !== "succeeded") { setState(old => ({ ...old, pendingSave: result.saveId, pendingSaveKind: "semantic" })); throw new Error("语义修订保存未完成，原结果仍保留。"); }
     },
     async retrySave(event) {
       trusted(event);
@@ -149,12 +169,12 @@ export function useMaterialAnalysis({ hostSession, getContext, isEditorBusy }) {
         if (operation.projectId !== current.projectId) throw new Error("请先打开待保存分析所属的项目。");
         result = await request(operation.path, operation.body, operation.key, { signal: AbortSignal.timeout(300_000) });
         pending.current = null;
-      } else if (state.pendingSave) result = await request(`analysis-saves/${encodeURIComponent(state.pendingSave)}/retries`, {}, crypto.randomUUID(), { signal: AbortSignal.timeout(300_000) });
+      } else if (state.pendingSave) result = await request(`${state.pendingSaveKind === "semantic" ? "semantic" : "analysis"}-saves/${encodeURIComponent(state.pendingSave)}/retries`, {}, crypto.randomUUID(), { signal: AbortSignal.timeout(300_000) });
       if (result?.saveStatus !== "succeeded") {
         setState(old => ({ ...old, pendingSave: result?.saveId || old.pendingSave }));
         throw new Error(result?.error?.message || "保存尚未确认。");
       }
-      setState(old => ({ ...old, pendingSave: null, error: "", phase: "补登记完成，可继续剩余分析" })); await refresh();
+      setState(old => ({ ...old, pendingSave: null, pendingSaveKind: null, error: "", phase: "补登记完成，可继续剩余分析" })); await refresh();
     },
     async component(componentId = "whisper-small-q8") { return hostSession.request(`/api/v1/components/${componentId}`); },
     async prepareComponent(event, componentId = "whisper-small-q8") {

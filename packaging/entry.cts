@@ -6,7 +6,8 @@ const resources = isSea()
   ? join(dirname(process.execPath), process.platform === "darwin" ? "../Resources" : "resources")
   : __dirname;
 
-void launch(join(resources, "dist")).catch((error: unknown) => {
+void launch(join(resources, "dist"), join(resources, "components", "scene-detect"),
+  join(resources, "components", "visual-search")).catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : "Auto-cut startup failed.");
   process.exitCode = 1;
 });

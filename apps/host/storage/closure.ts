@@ -5,6 +5,7 @@ import { assetRecord } from "./assets.ts";
 import { snapshotRecord, validateSnapshot } from "./snapshots.ts";
 import { tombstoneRecord } from "./trash.ts";
 import { analysisReferences, verifyAnalysisObject } from "./analysis-closure.ts";
+import { semanticReferences, verifySemanticObject } from "./semantic-closure.ts";
 import { classificationRecord, scriptRecord, scriptDigest } from "./script-records.ts";
 import { validateScriptSources } from "./scripts.ts";
 import { planningTaskRecord } from "./planning-records.ts";
@@ -70,6 +71,8 @@ export async function verifyProjectClosure(files: ProjectFiles, manifest: Manife
         continue;
       }
     }
+    if (["analysis", "task", "result"].includes(object.kind) &&
+        await verifySemanticObject(object, await read(object), manifest, read)) continue;
     if (["analysis", "task", "result"].includes(object.kind) &&
         await verifyAnalysisObject(object, await read(object), manifest, read)) continue;
     if (object.kind === "media") {
@@ -202,6 +205,8 @@ export async function retainProjectClosure(files: ProjectFiles, manifest: Manife
       for (const source of item.draft.sources) pending.push(source.assetRef, source.mediaRef, ...(source.analysisRef ? [source.analysisRef] : []));
       continue;
     }
+    const semanticRefs = semanticReferences(object, value);
+    if (semanticRefs) { pending.push(...semanticRefs); continue; }
     const analysisRefs = analysisReferences(object, value);
     if (analysisRefs) { pending.push(...analysisRefs); continue; }
     if (object.kind === "analysis") { pending.push(...manifest.objects); continue; }

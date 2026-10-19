@@ -48,7 +48,9 @@ npm run build:package -- \
   --runtime /absolute/matching-node \
   --runtime-license /absolute/NODE-LICENSE \
   --runtime-source https://nodejs.org/dist/v24.X.Y/ \
-  --runtime-sha256 ACTUAL_EXECUTABLE_SHA256
+  --runtime-sha256 ACTUAL_EXECUTABLE_SHA256 \
+  --scene-component /absolute/reviewed-scene-component \
+  --visual-search-component /absolute/reviewed-visual-search-component
 ```
 
 Use actual reviewed values instead of the placeholders. The default is `--mode sea`.
@@ -57,6 +59,35 @@ disables snapshots/code cache. It bundles the host while keeping web resources
 as normal files. Missing postject is an explicit error, not an automatic download
 or silent fallback. Review official Node and postject instructions before the
 separately authorized signing step.
+
+`--scene-component` is optional. When supplied, it must be a local, complete
+Auto-cut SceneDetect component for the build platform. The builder verifies its
+manifest, exact Python/PySceneDetect/OpenCV identity, imports, complete file
+inventory, per-file SHA-256 values, license files and absence of links before
+copying it to `resources/components/scene-detect`. It does not create a Python
+environment, install packages, download files or fall back to PATH. Omitting the
+option produces a package whose scene-analysis capability reports missing.
+
+`--visual-search-component` is optional and follows the same no-download rule.
+When supplied, it must be a complete component for the build platform with a
+managed Python executable and adapter, exact package provenance/digests,
+license files, and a locally present `openai/clip-vit-base-patch32` model. Its
+manifest locks the model and processor commit revisions, every model file,
+their aggregate digest, float32 precision and 512-dimensional output. The
+builder verifies the complete link-free file inventory before copying it to
+`resources/components/visual-search`; it does not install Python packages,
+fetch model files, or test retrieval quality. Omitting it leaves visual search
+unavailable while projects, saved scripts and manual editing remain usable.
+
+The component root contains `component-manifest.json` with schema version 1,
+component `autocut.scene-detect-runtime` revision `0.2.0`, tool
+`autocut.scene_detect` revision `0.2.0`, target `platform`/`arch`, an exact
+`python.version` and relative `python.executable`, package provenance/digests,
+non-empty relative license paths, and every other file's relative path, byte
+size and SHA-256. The reviewed package set for this revision requires
+`scenedetect` 0.7.2 and `opencv-python` 4.14.0.94. The manifest itself is excluded
+from its file inventory. All paths use `/`, stay inside the root and resolve
+without symbolic links.
 
 On macOS, a universal Node input is thinned to arm64 in the output copy before
 injection, so postject sees a single SEA sentinel. The input runtime is unchanged.
@@ -71,8 +102,8 @@ and `NODE_PATH` before executing its bundled Node. Windows output is `Auto-cut/`
 with SEA at the root or runtime under `resources/runtime`. The generated installer
 definition selects the appropriate shortcut target without searching PATH.
 
-`package-manifest.json` records runtime identity, provenance, signing-not-performed
-status and per-file byte hashes. Signing changes executable bytes; this manifest
+`package-manifest.json` records runtime plus optional SceneDetect and visual-search
+component identities, provenance, signing-not-performed status and per-file byte hashes. Signing changes executable bytes; this manifest
 describes the pre-signing artifact and must not be used as a signed release digest.
 
 ## macOS DMG

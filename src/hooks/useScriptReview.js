@@ -29,6 +29,15 @@ export function useScriptReview({ hostSession, getContext }) {
     prepareAgent: ({ requestId, source = { kind: "harness", harness: "unknown", providerId: "unknown", model: "unknown", authType: "unknown" }, maxInputBytes = 200000, ...input }) =>
       request("agent-planning-runs", { ...input, source, maxInputBytes }, requestId),
     submitAgent: ({ taskId, ...output }) => request(`agent-planning-runs/${encodeURIComponent(taskId)}/outputs`, output, output.inputDigest),
+    async inspectSemantic(taskId) {
+      if (taskId) return request(`agent-semantic-runs/${encodeURIComponent(taskId)}/context`, {});
+      return request("semantic-catalog");
+    },
+    prepareSemantic: ({ requestId, source = { kind: "harness", harness: "unknown", providerId: "unknown", model: "unknown", authType: "unknown" }, maxInputBytes = 200000, ...input }) =>
+      request("agent-semantic-runs", { ...input, source, maxInputBytes }, requestId),
+    submitSemantic: ({ taskId, ...output }) => request(`agent-semantic-runs/${encodeURIComponent(taskId)}/outputs`, output, output.inputDigest),
+    inspectVisualSearch: () => request("visual-search"),
+    queryVisualSearch: input => request("visual-search/queries", input),
     saveProvider: (event, value) => {
       if (!event?.isTrusted) throw new Error("请从配置面板直接保存服务配置。");
       return hostSession.request("/api/v1/planning-provider", value);

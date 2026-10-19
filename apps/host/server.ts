@@ -28,6 +28,12 @@ import { registerPlanningRoutes } from "./planning-routes.ts";
 import { createAnalysisResources } from "./whisper-resources.ts";
 import { createSceneDetectRunner } from "./scene-detect-runner.ts";
 import { analysisTaskRecord } from "./storage/analysis-records.ts";
+import { createSemanticService } from "./semantic-service.ts";
+import { registerSemanticRoutes } from "./semantic-routes.ts";
+import { semanticTaskRecord } from "./storage/semantic-records.ts";
+import { createVisualSearchRunner } from "./visual-search-runner.ts";
+import { createVisualSearchService } from "./visual-search-service.ts";
+import { registerVisualSearchRoutes } from "./visual-search-routes.ts";
 
 const text = { type: "string", minLength: 1, maxLength: 256 };
 const object = (properties: Record<string, unknown>, required = Object.keys(properties)) => ({
@@ -74,7 +80,7 @@ const analysisReceipt = object({ saveId: text, saveStatus: { enum: ["queued", "w
 
 export async function startHost(options: {
   instanceId: string; proof: string; dist: string; storageExecutable?: string; machineDirectory?: string;
-  openMontageRoot?: string; pythonExecutable?: string;
+  sceneComponentRoot?: string; visualSearchComponentRoot?: string; pythonExecutable?: string;
   openBrowser: (url: string) => Promise<void>;
   release: () => Promise<void>;
 }) {
@@ -89,10 +95,13 @@ export async function startHost(options: {
   const whisper = createAnalysisResources(options.machineDirectory, "whisper-small-q8");
   const yolos = createAnalysisResources(options.machineDirectory, "yolos-tiny-q8");
   const silero = createAnalysisResources(options.machineDirectory, "silero-vad");
-  const scene = createSceneDetectRunner(options.openMontageRoot, options.pythonExecutable);
+  const scene = createSceneDetectRunner(options.sceneComponentRoot, options.pythonExecutable);
   const analyses = createAnalysisService(projects, { speech: whisper, detection: yolos, segmentation: silero, scene });
   const planningConfig = createPlanningConfig(options.machineDirectory, options.storageExecutable ?? join(dirname(options.dist), "autocut-storage"));
   const planning = createPlanningService(projects, planningConfig);
+  const semantics = createSemanticService(projects);
+  const visualSearchRunner = createVisualSearchRunner(options.visualSearchComponentRoot);
+  const visualSearch = createVisualSearchService(projects, visualSearchRunner, options.machineDirectory);
   const selections = createFileSelections();
   const imports = options.machineDirectory ? await createMigrationImports(options.machineDirectory, options.storageExecutable ?? join(dirname(options.dist), "autocut-storage")) : null;
   app.addContentTypeParser("application/octet-stream", (_request, payload, done) => done(null, payload));
@@ -127,6 +136,8 @@ export async function startHost(options: {
       await imports?.close();
       await analyses.close();
       await planning.close();
+      await semantics.close();
+      await visualSearch.close();
       await whisper.close();
       await yolos.close();
       await silero.close();
@@ -199,6 +210,8 @@ export async function startHost(options: {
   registerScriptRoutes(app, projects, pageFor, success, errorEnvelope);
   registerExecutionRoutes(app, projects, pageFor, success, errorEnvelope);
   registerPlanningRoutes(app, planningConfig, planning, pageFor, success, errorEnvelope);
+  registerSemanticRoutes(app, semantics, pageFor, success, errorEnvelope);
+  registerVisualSearchRoutes(app, visualSearch, pageFor, success, errorEnvelope);
   app.get("/healthz", { schema: { querystring: emptyQuery, response: {
     200: object({ status: { const: "ready" }, protocolVersion: { const: 1 } }),
     503: object({ status: { const: "not_ready" }, protocolVersion: { const: 1 } }),
@@ -413,7 +426,7 @@ export async function startHost(options: {
     reply.code(202); return success(request, accepted);
   });
   app.get<{ Params: { taskId: string } }>("/api/v1/tasks/:taskId", {
-    schema: { params: object({ taskId: text }), querystring: emptyQuery, response: responses({ anyOf: [z.toJSONSchema(analysisTaskRecord, { target: "draft-7" }), object({ taskId: text, projectId: text,
+    schema: { params: object({ taskId: text }), querystring: emptyQuery, response: responses({ anyOf: [z.toJSONSchema(analysisTaskRecord, { target: "draft-7" }), z.toJSONSchema(semanticTaskRecord, { target: "draft-7" }), object({ taskId: text, projectId: text,
       status: { enum: ["queued", "running", "succeeded", "failed"] }, saveId: text, stepId: text, attemptId: text,
       resultId: nullableText, assetId: nullableText, error: { anyOf: [object({ code: text, message: { type: "string", maxLength: 1024 } }), { type: "null" }] } }),
       object({ taskId: text, projectId: text, exportId: text, attemptId: text, savePointId: text,
@@ -424,7 +437,7 @@ export async function startHost(options: {
         status: { enum: ["queued", "running", "cancel_requested", "succeeded", "failed", "interrupted", "cancelled"] },
         output: { anyOf: [object({ name: text, projectId: text, savePointId: text }), { type: "null" }] },
         error: { anyOf: [object({ code: text, message: { type: "string", maxLength: 1024 } }), { type: "null" }] } })] }) },
-  }, async request => success(request, await analyses.findTask(pageFor(request), request.params.taskId) ?? await imports?.task(pageFor(request), request.params.taskId) ?? await projects.migrationTask(pageFor(request), request.params.taskId) ?? projects.task(pageFor(request), request.params.taskId)));
+  }, async request => success(request, await analyses.findTask(pageFor(request), request.params.taskId) ?? await semantics.findTask(pageFor(request), request.params.taskId) ?? await imports?.task(pageFor(request), request.params.taskId) ?? await projects.migrationTask(pageFor(request), request.params.taskId) ?? projects.task(pageFor(request), request.params.taskId)));
   app.post<{ Params: { taskId: string }; Body: { projectId: string; editorSessionId: string; stepId: string; reason: string } | { projectId: string; editorSessionId: string; reason: string } | { reason: string } }>("/api/v1/tasks/:taskId/cancel-requests", {
     schema: { params: object({ taskId: text }), querystring: emptyQuery,
       body: { anyOf: [object({ projectId: text, editorSessionId: text, stepId: text, reason: { const: "user" } }), object({ projectId: text, editorSessionId: text, reason: { const: "user" } }), object({ reason: { const: "user" } })] },
@@ -434,8 +447,15 @@ export async function startHost(options: {
     if (typeof key !== "string" || !key.length || key.length > 128) throw new HostError("INVALID_ARGUMENT", 400, "Idempotency-Key is required.");
     const body = request.body;
     if (!("projectId" in body) && !imports) throw new HostError("COMPONENT_NOT_READY", 503, "Import task storage is unavailable.");
-    const result = "stepId" in body ? await analyses.act(pageFor(request), body.projectId, body.editorSessionId, request.params.taskId, key, { action: "cancel", stepId: body.stepId }) : "projectId" in body ? await projects.cancelMigration(pageFor(request), body.projectId, body.editorSessionId, request.params.taskId) :
-      await imports!.cancel(pageFor(request), request.params.taskId);
+    let result;
+    if ("stepId" in body) {
+      result = await analyses.act(pageFor(request), body.projectId, body.editorSessionId, request.params.taskId, key,
+        { action: "cancel", stepId: body.stepId });
+    } else if ("projectId" in body) {
+      const semantic = await semantics.findTask(pageFor(request), request.params.taskId);
+      result = semantic ? await semantics.cancel(pageFor(request), body.projectId, body.editorSessionId, request.params.taskId)
+        : await projects.cancelMigration(pageFor(request), body.projectId, body.editorSessionId, request.params.taskId);
+    } else result = await imports!.cancel(pageFor(request), request.params.taskId);
     reply.code(202); return success(request, result);
   });
   app.post<{ Params: { taskId: string }; Body: { projectId: string; editorSessionId: string; stepId: string; expectedRevision: number } | { projectId: string; editorSessionId: string; expectedAttemptId: string } | { selectionId: string; expectedAttemptId: string } }>("/api/v1/tasks/:taskId/retries", {
@@ -463,7 +483,7 @@ export async function startHost(options: {
         registration: { enum: ["staged", "registered"] }, saveId: text, saveStatus: { enum: ["queued", "writing", "succeeded", "failed"] },
         artifacts: { type: "array", items: object({ artifactId: text, mediaRef: object({ kind: { const: "media" }, entityId: text, blobId: text }) }) },
         error: { anyOf: [object({ code: text, message: { type: "string", maxLength: 1024 } }), { type: "null" }] } })] }) },
-  }, async request => success(request, await analyses.findResult(pageFor(request), request.params.resultId) ?? projects.result(pageFor(request), request.params.resultId)));
+  }, async request => success(request, await analyses.findResult(pageFor(request), request.params.resultId) ?? await semantics.findResult(pageFor(request), request.params.resultId) ?? projects.result(pageFor(request), request.params.resultId)));
   app.post<{ Params: { resultId: string }; Body: { editorSessionId: string; expectedSaveId: string } }>("/api/v1/results/:resultId/registration-retries", {
     schema: { params: object({ resultId: text }), querystring: emptyQuery, body: object({ editorSessionId: text, expectedSaveId: text }),
       response: { 202: object({ ok: { const: true }, data: { anyOf: [analysisReceipt, object({ taskId: text, stepId: text, saveId: text, replayed: { type: "boolean" } })] }, meta }), "4xx": errorEnvelope, "5xx": errorEnvelope } },
@@ -471,7 +491,9 @@ export async function startHost(options: {
     const key = request.headers["idempotency-key"];
     if (typeof key !== "string" || !key.length || key.length > 128) throw new HostError("INVALID_ARGUMENT", 400, "Idempotency-Key is required.");
     const analysis = await analyses.findResult(pageFor(request), request.params.resultId);
-    const result = analysis ? await analyses.retrySave(pageFor(request), analysis.projectId, request.body.editorSessionId, request.body.expectedSaveId, key, request.params.resultId) :
+    const semantic = analysis ? null : await semantics.findResult(pageFor(request), request.params.resultId);
+    const result = analysis ? await analyses.retrySave(pageFor(request), analysis.projectId, request.body.editorSessionId, request.body.expectedSaveId, key, request.params.resultId) : semantic ?
+      await semantics.retrySave(pageFor(request), semantic.projectId, request.body.editorSessionId, request.body.expectedSaveId, key, request.params.resultId) :
       await projects.retryRegistration(pageFor(request), request.params.resultId, request.body.editorSessionId, request.body.expectedSaveId, key);
     reply.code(202);
     return success(request, result);
@@ -531,7 +553,7 @@ export async function startHost(options: {
   }, async (request) => {
     const key = request.headers["idempotency-key"];
     if (typeof key !== "string" || !key.length || key.length > 128) throw new HostError("INVALID_ARGUMENT", 400, "Idempotency-Key is required.");
-    if (projects.busy() || planning.busy() || selections.busy() || imports?.busy()) throw new HostError("TASKS_DRAINING", 409, "Wait for project operations to finish before stopping.");
+    if (projects.busy() || planning.busy() || visualSearch.busy() || selections.busy() || imports?.busy()) throw new HostError("TASKS_DRAINING", 409, "Wait for project operations to finish before stopping.");
     return success(request, lifecycle.exit(pageFor(request), request.body, key));
   });
 

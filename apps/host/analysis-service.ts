@@ -10,6 +10,7 @@ import { encodeId, normalizedBytes, referenceKey, type Save } from "./storage/re
 import { whisperModelId, whisperRevision, yolosModelId, yolosRevision, type createAnalysisResources } from "./whisper-resources.ts";
 import { SILERO_SPEECH_SEGMENTATION } from "../../src/config/sileroVad.js";
 import { sceneDetectToolId, sceneDetectToolRevision, type SceneDetectRunner } from "./scene-detect-runner.ts";
+import { LEGACY_SCENE_DETECT_TOOL_ID } from "../../src/config/sceneDetect.js";
 
 const id = z.string().min(1).max(256);
 export const analysisSelection = z.strictObject({ inputs: z.array(analysisBasis).min(1).max(1000), force: z.boolean() });
@@ -125,11 +126,25 @@ export function createAnalysisService(projects: Projects, resources: { speech: R
     if (cursor !== end) throw new HostError("OUTPUT_VALIDATION_FAILED", 422, "SceneDetect did not cover the requested source range.");
     return { text: "", language: "", words: [], samples: [], scenes: normalized, coverage: [basis.range], complete: true, missingCapabilities: [] };
   };
+  const requireCurrentSceneBasis = (basis: z.infer<typeof analysisBasis>) => {
+    if (basis.capability !== "scene") return;
+    if (basis.model.id === LEGACY_SCENE_DETECT_TOOL_ID) {
+      throw new HostError("ANALYSIS_BASIS_OUTDATED", 409, "This legacy OpenMontage SceneDetect task cannot continue with the Auto-cut adapter. Start a new scene analysis.");
+    }
+    if (basis.model.id !== sceneDetectToolId || basis.model.revision !== sceneDetectToolRevision ||
+        basis.model.runtime !== "host-python-pyscenedetect" || !basis.settings.sceneDetection ||
+        basis.settings.sceneDetection.backend !== "pyscenedetect" || basis.settings.sceneDetection.method !== "content" ||
+        basis.settings.sceneDetection.threshold !== 27 || basis.settings.sceneDetection.minSceneLengthSeconds !== 1 ||
+        basis.settings.sceneDetection.toolRevision !== sceneDetectToolRevision) {
+      throw new HostError("INVALID_ARGUMENT", 400, "SceneDetect requires the fixed Auto-cut PySceneDetect content configuration.");
+    }
+  };
   const runScene = (page: PageSession, projectId: string, editorId: string, taskId: string, key: string, operation: z.infer<typeof analysisAction> & { action: "run-scene" }) => (async () => {
     const project = writable(page, projectId, editorId), old = previous(project, taskId, key, operation);
     if (old) return receipt(old, true);
     const value = await task(project, taskId), step = value.steps.find(item => item.stepId === operation.stepId);
     if (!step || step.basis.capability !== "scene") throw new HostError("INVALID_ARGUMENT", 400, "This step is not a SceneDetect analysis.");
+    requireCurrentSceneBasis(step.basis);
     const lease = activeLease(project, step.stepId);
     if (step.status !== "running" || !lease || lease.attemptId !== operation.attemptId || lease.pageSessionId !== page.pageSessionId || lease.editorSessionId !== editorId) {
       throw new HostError("ATTEMPT_STALE", 409, "This SceneDetect attempt is no longer owned by the current executor.");
@@ -216,13 +231,7 @@ export function createAnalysisService(projects: Projects, resources: { speech: R
           if (basis.capability === "detection" && (basis.model.id !== yolosModelId || basis.model.revision !== yolosRevision || basis.model.precision !== "q8")) {
             throw new HostError("INVALID_ARGUMENT", 400, "Subject detection requires the fixed YOLOS Q8 identity.");
           }
-          if (basis.capability === "scene" && (basis.model.id !== sceneDetectToolId || basis.model.revision !== sceneDetectToolRevision ||
-              basis.model.runtime !== "host-python-pyscenedetect" || !basis.settings.sceneDetection ||
-              basis.settings.sceneDetection.backend !== "pyscenedetect" || basis.settings.sceneDetection.method !== "content" ||
-              basis.settings.sceneDetection.threshold !== 27 || basis.settings.sceneDetection.minSceneLengthSeconds !== 1 ||
-              basis.settings.sceneDetection.toolRevision !== sceneDetectToolRevision)) {
-            throw new HostError("INVALID_ARGUMENT", 400, "SceneDetect requires the fixed PySceneDetect content configuration.");
-          }
+          requireCurrentSceneBasis(basis);
           const identity = analysisBasisDigest(basis);
           if (identities.has(identity)) throw new HostError("INVALID_ARGUMENT", 400, "The same analysis input was selected twice.");
           identities.add(identity);
@@ -310,6 +319,7 @@ export function createAnalysisService(projects: Projects, resources: { speech: R
         switch (input.action) {
           case "claim":
             if (step.status !== "queued" || lease) throw new HostError("RESOURCE_BUSY", 409, "This analysis step is not available to claim.");
+            requireCurrentSceneBasis(step.basis);
             await validateAnalysisBasis(project.files, project.commits.current(), step.basis);
             step.status = "running"; break;
           case "checkpoint": {
@@ -341,6 +351,7 @@ export function createAnalysisService(projects: Projects, resources: { speech: R
             if (lease || !(["failed", "interrupted", "cancelled"].includes(step.status) || ["running", "cancel_requested"].includes(step.status))) {
               throw new HostError("TASK_NOT_RETRYABLE", 409, "Only failed or interrupted steps can be continued.");
             }
+            requireCurrentSceneBasis(step.basis);
             await validateAnalysisBasis(project.files, project.commits.current(), step.basis);
             step.attemptId = randomUUID(); step.status = "queued"; step.error = null; break;
         }

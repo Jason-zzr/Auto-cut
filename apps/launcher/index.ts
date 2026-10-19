@@ -3,13 +3,13 @@ import { machineDirectory, openBrowser } from "./platform.ts";
 import { claimInstance } from "../host/instance.ts";
 import { startHost } from "../host/server.ts";
 
-export async function launch(dist: string) {
+export async function launch(dist: string, sceneComponentRoot?: string, visualSearchComponentRoot?: string) {
   const directory = await machineDirectory();
   const instance = await claimInstance(directory);
   if (!instance) return;
   let host: Awaited<ReturnType<typeof startHost>>;
   try {
-    host = await startHost({ ...instance, dist, openBrowser, machineDirectory: directory });
+    host = await startHost({ ...instance, dist, sceneComponentRoot, visualSearchComponentRoot, openBrowser, machineDirectory: directory });
   } catch (error) {
     try { await instance.release(); }
     catch (cleanupError) {
