@@ -41,6 +41,7 @@ export function createSessions(instanceId: string) {
       if (!authorization?.startsWith("Bearer ")) throw new HostError("AUTH_REQUIRED", 401, "Page authentication required.");
       const page = pages.get(authorization.slice(7));
       if (!page) throw new HostError("SESSION_EXPIRED", 401, "Reopen from the launcher. Keep this page to export unsaved edits.");
+      page.expiresAt = new Date(Date.now() + 30 * 60_000).toISOString();
       return page;
     },
     clear() { nonces.clear(); pages.clear(); },

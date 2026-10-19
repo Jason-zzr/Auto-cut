@@ -43,7 +43,12 @@ export function createEvents(instanceId: string) {
           if (!closed && !raw.write(line)) close();
         },
       };
-      const expiry = setTimeout(close, Math.max(0, Date.parse(page.expiresAt) - Date.now()));
+      let expiry = setTimeout(checkExpiry, Math.max(0, Date.parse(page.expiresAt) - Date.now()));
+      function checkExpiry() {
+        const remaining = Date.parse(page.expiresAt) - Date.now();
+        if (remaining <= 0) close();
+        else expiry = setTimeout(checkExpiry, remaining);
+      }
       const heartbeat = setInterval(() => subscriber.send("\n"), 15_000);
       raw.once("close", close);
       raw.once("error", close);

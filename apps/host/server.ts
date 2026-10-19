@@ -78,7 +78,7 @@ export async function startHost(options: {
   openBrowser: (url: string) => Promise<void>;
   release: () => Promise<void>;
 }) {
-  const web = await inspectWebResources(options.dist);
+  let web = await inspectWebResources(options.dist);
   const app = Fastify({ logger: false, disableRequestLogging: true, bodyLimit: 16_384,
     requestTimeout: 0, connectionTimeout: 60_000, forceCloseConnections: true,
     ajv: { customOptions: { removeAdditional: false, coerceTypes: false, useDefaults: false } } });
@@ -539,6 +539,7 @@ export async function startHost(options: {
     dotfiles: "allow", redirect: false, maxAge: 0 });
   const serve = async (request: FastifyRequest<{ Params: { "*"?: string } }>, reply: FastifyReply) => {
     const name = request.params["*"] || "index.html";
+    if (name === "index.html") web = await inspectWebResources(options.dist);
     if (!web.files.has(name) || name.includes("\\") || name.split("/").some((part) => !part || part === "." || part === "..")) {
       throw new HostError("INVALID_ARGUMENT", 404, "Web resource not found.");
     }

@@ -11,6 +11,7 @@ export async function connectHostSession() {
   let retryTimer;
   let streamController;
   let closed = false;
+  let nextRefreshAt = 0;
   const update = (changes) => {
     snapshot = { ...snapshot, ...changes };
     for (const listener of listeners) listener();
@@ -63,6 +64,11 @@ export async function connectHostSession() {
       update({ connection: "expired" });
       throw new Error("Instance changed. Reopen from the launcher; keep this page to export edits.");
     }
+    const expiresAt = Date.parse(session.expiresAt);
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) throw new Error("Invalid page session expiry.");
+    credential = { ...credential, expiresAt: new Date(Math.max(expiresAt, Date.parse(credential.expiresAt))).toISOString() };
+    try { sessionStorage.setItem(STORAGE_KEY, JSON.stringify(credential)); } catch { /* Keep the capability only in memory. */ }
+    nextRefreshAt = Date.now() + 60_000;
     const components = await request("/api/v1/components");
     if (closed) return;
     if (!Array.isArray(components.items)) throw new Error("Invalid component response.");
@@ -136,7 +142,10 @@ export async function connectHostSession() {
         while ((newline = buffer.indexOf("\n")) >= 0) {
           const line = buffer.slice(0, newline).trim();
           buffer = buffer.slice(newline + 1);
-          if (!line) continue;
+          if (!line) {
+            if (Date.now() >= nextRefreshAt) await refresh();
+            continue;
+          }
           const event = JSON.parse(line);
           if (event.schemaVersion !== 1 || typeof event.eventId !== "string" || typeof event.cursor !== "string" ||
               !Number.isInteger(event.sequence) || event.entity?.id !== credential?.instanceId) throw new Error("Invalid service event.");

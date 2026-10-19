@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createProjectSaveQueue } from "../lib/projectSaveQueue.js";
 import { waitForHostMediaController } from "../lib/serviceWorker.js";
 import { trashSelection } from "../lib/projectTrash.js";
@@ -47,10 +47,10 @@ export function useCompleteProject({ hostSession, captureCompleteProject, prepar
     });
   };
 
-  const acquire = async (current) => {
+  const acquire = useCallback(async (current) => {
     const pageSessionId = hostSession.getSnapshot().session?.pageSessionId;
     current.lease = await hostSession.request(`/api/v1/projects/${encodeURIComponent(current.project.projectId)}/editor-sessions`, { pageSessionId, mode: "write" });
-  };
+  }, [hostSession]);
   const installQueue = (current) => {
     current.queue = createProjectSaveQueue({ hostSession, projectId: current.project.projectId,
       editorSequence: current.project.editorSequence ?? -1,
@@ -368,13 +368,28 @@ export function useCompleteProject({ hostSession, captureCompleteProject, prepar
     const renew = async () => {
       if (disposed || hostSession.getSnapshot().connection === "draining") return;
       const current = binding.current;
-      if (current?.lease) {
+      const lease = current?.lease;
+      if (lease) {
         try {
-          current.lease = await hostSession.request(`/api/v1/editor-sessions/${encodeURIComponent(current.lease.editorSessionId)}/renew`, { revision: current.lease.revision });
+          const renewed = await hostSession.request(`/api/v1/editor-sessions/${encodeURIComponent(lease.editorSessionId)}/renew`, { revision: lease.revision });
+          if (!disposed && binding.current === current && current.lease === lease) current.lease = renewed;
         } catch (error) {
-          current.lease = null;
-          if (!disposed && binding.current === current && hostSession.getSnapshot().connection !== "draining") {
-            setState(previous => ({ ...previous, status: "error", error: error.message }));
+          if (!disposed && binding.current === current && current.lease === lease && hostSession.getSnapshot().connection !== "draining") {
+            if (["EDITOR_SESSION_EXPIRED", "REVISION_CONFLICT"].includes(error?.code)) {
+              try {
+                await acquire(current);
+                if (!disposed && binding.current === current) {
+                  current.queue?.retry();
+                  if (!current.queue?.busy()) setState(previous => ({ ...previous, status: "idle", error: "" }));
+                }
+              } catch (recoveryError) {
+                current.lease = null;
+                setState(previous => ({ ...previous, status: "error", error: recoveryError.message }));
+              }
+            } else {
+              current.lease = null;
+              setState(previous => ({ ...previous, status: "error", error: error.message }));
+            }
           }
         }
       }
@@ -392,7 +407,7 @@ export function useCompleteProject({ hostSession, captureCompleteProject, prepar
       current?.unsubscribe?.(); current?.queue?.close();
       binding.current = null;
     };
-  }, [hostSession]);
+  }, [acquire, hostSession]);
 
   const migration = useProjectMigration({ hostSession, getExportContext: async (requireSaved = true) => {
     const current = binding.current;
