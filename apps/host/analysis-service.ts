@@ -85,9 +85,9 @@ export function createAnalysisService(projects: Projects, resources: { speech: R
     const analysisId = randomUUID(), resultId = randomUUID();
     step.status = "succeeded"; step.resultId = resultId; step.analysisRef = { kind: "analysis", entityId: analysisId, revision: 1 };
     return {
-      analysis: { schemaVersion: 1, format: "material-analysis" as const, projectId, analysisId, revision: 1,
+      analysis: { schemaVersion: 1 as const, format: "material-analysis" as const, projectId, analysisId, revision: 1 as const,
         taskId, attemptId: step.attemptId, resultId, basis: step.basis, basisDigest: analysisBasisDigest(step.basis), output, createdAt: now },
-      result: { schemaVersion: 1, format: "material-analysis-result" as const, projectId, resultId, revision: 1,
+      result: { schemaVersion: 1 as const, format: "material-analysis-result" as const, projectId, resultId, revision: 1 as const,
         taskId, attemptId: step.attemptId, registration: "registered" as const, analysisRef: step.analysisRef,
         taskRef: { kind: "task" as const, entityId: taskId, revision: 0 } },
     };
