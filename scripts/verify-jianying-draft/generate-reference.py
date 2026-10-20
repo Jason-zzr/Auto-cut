@@ -47,9 +47,29 @@ def add_media(item, track, start, root_ref=None, clip_settings=None):
     target = jy.Timerange(micros(start), micros(item["duration"]))
     source_range = jy.Timerange(micros(item.get("sourceStart", 0)), micros(item["duration"] * speed))
     volume = 0 if source["kind"] == "image" and track == "image" else item.get("volume", 1)
+    if not audio and item.get("baseTransform"):
+        base = item["baseTransform"]
+        clip_settings = jy.ClipSettings(
+            alpha=base.get("opacity", 1), rotation=base.get("rotation", 0),
+            scale_x=base.get("scale", 1), scale_y=base.get("scale", 1),
+            transform_x=base.get("x", 0) / 50, transform_y=-base.get("y", 0) / 50)
     segment = (segment_cls(material, target, source_timerange=source_range, speed=speed, volume=volume)
                if audio else segment_cls(material, target, source_timerange=source_range, speed=speed,
                                           volume=volume, clip_settings=clip_settings))
+    if not audio:
+        properties = [
+            ("x", jy.KeyframeProperty.position_x, lambda value: value / 50),
+            ("y", jy.KeyframeProperty.position_y, lambda value: -value / 50),
+            ("scale", jy.KeyframeProperty.uniform_scale, lambda value: value),
+            ("rotation", jy.KeyframeProperty.rotation, lambda value: value),
+            ("opacity", jy.KeyframeProperty.alpha, lambda value: value),
+        ]
+        for name, prop, convert in properties:
+            for frame in item.get("keyframes", []):
+                if name in frame:
+                    local_time = round(round(frame["time"] * 30) * 1_000_000 / 30)
+                    segment.add_keyframe(prop, source_range.start + round(local_time * speed),
+                                         convert(frame[name]))
     if item.get("transition"):
         transition = item["transition"]
         segment.add_transition(getattr(jy.TransitionType, transition_names[transition["id"]]), duration=micros(transition["duration"]))

@@ -10,9 +10,17 @@ export function registerJianyingRoutes(app: FastifyInstance, projects: Projects,
   success: (request: FastifyRequest, data: unknown) => unknown, errorEnvelope: unknown) {
   const id = z.string().min(1).max(256), empty = z.strictObject({});
   const body = z.strictObject({ draftName: z.string().min(1).max(200).optional(), outputDir: z.string().min(1).max(4096).optional() });
-  const issue = z.strictObject({ track: z.string(), segmentId: z.string(), feature: z.string(), reason: z.string() });
+  const issue = z.strictObject({ track: z.string(), segmentId: z.string(), feature: z.string(), reason: z.string(),
+    targetProfile: z.string() });
+  const target = z.strictObject({ id: z.string(), product: z.literal("jianying"), appVersion: z.string(),
+    platform: z.literal("macOS"), bundleId: z.string(), applicationPath: z.string(), executableName: z.string(),
+    defaultDraftRoots: z.array(z.string()), mainTimelineFile: z.literal("draft_info.json"),
+    synchronizedTimelineFiles: z.array(z.string()), template: z.strictObject({ product: z.literal("jianying"),
+      appVersion: z.string(), format: z.literal("plaintext-bootstrap") }) });
   const data = z.strictObject({ draftPath: z.string(), draftName: z.string(), replayed: z.boolean(),
-    report: z.strictObject({ mapped: z.array(issue), skipped: z.array(issue) }) });
+    report: z.strictObject({ status: z.enum(["editable-pass", "editable-with-degradation", "blocked"]), target,
+      mapped: z.array(issue), degraded: z.array(issue), unsupported: z.array(issue), blocked: z.array(issue),
+      skipped: z.array(issue) }) });
   const json = (value: z.ZodType) => z.toJSONSchema(value, { target: "draft-7" });
   const requests = new Map<string, { digest: string; result: ReturnType<typeof exportJianyingDraft> }>();
   app.post<{ Params: { projectId: string }; Body: z.infer<typeof body> }>("/api/v1/projects/:projectId/jianying-export", {

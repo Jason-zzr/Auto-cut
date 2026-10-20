@@ -3,7 +3,10 @@ import { getCaptionTimeline, getVisualSegmentTimeline, getTimedSegmentsEnd, pack
 import { getLinkedSourceAudioSegments, shouldMuteEmbeddedVideoAudio } from "../../../src/lib/sourceAudioSync.js";
 import { RATIO_OPTIONS, STICKER_LIBRARY } from "../../../src/config/editor.js";
 import { objectReference, type ObjectReference } from "../storage/records.ts";
-import type { ClipSettings, DraftClip, DraftModel, DraftTrack, MediaResolver, ResolvedMedia, StickerResolver } from "./draft-types.ts";
+import { addExportIssue, createExportReport, type ExportReportCategory } from "./compatibility-report.ts";
+import { jianyingTargetProfile, transitionCatalog } from "./jianying-profile.ts";
+import type { ClipSettings, DraftClip, DraftKeyframeProperty, DraftModel, DraftTrack, MediaResolver, ResolvedMedia,
+  StickerResolver } from "./draft-types.ts";
 
 type Item = Record<string, unknown>;
 const record = (value: unknown): Item => value && typeof value === "object" && !Array.isArray(value) ? value as Item : {};
@@ -11,6 +14,7 @@ const list = (value: unknown): Item[] => Array.isArray(value) ? value.map(record
 const number = (value: unknown, fallback = 0) => typeof value === "number" && Number.isFinite(value) ? value : fallback;
 const text = (value: unknown, fallback = "") => typeof value === "string" ? value : fallback;
 const us = (seconds: number) => Math.round(seconds * 1_000_000);
+const present = (value: unknown) => Boolean(value) && (typeof value !== "object" || Object.keys(value as object).length > 0);
 
 export function clipMediaReference(item: Item, assets: Item[] = []): ObjectReference | null {
   const bindings = record(item.mediaBindings);
@@ -32,25 +36,66 @@ export function timelineMediaReferences(payload: Item) {
   ].filter(ref => ref !== null);
 }
 
-export const transitionCatalog: Record<string, { name: string; resourceId: string; effectId: string; overlap: boolean }> = {
-  fade: { name: "叠化", resourceId: "6724845717472416269", effectId: "322577", overlap: true },
-  zoom: { name: "推近", resourceId: "6724226861666144779", effectId: "359359", overlap: false },
-  flash: { name: "闪白", resourceId: "6724845376098013708", effectId: "322575", overlap: false },
-  "wipe-left": { name: "向左擦除", resourceId: "6724849999336706573", effectId: "2917283", overlap: true },
-  "wipe-up": { name: "向上擦除", resourceId: "6724849456891564557", effectId: "2917281", overlap: true },
-  blur: { name: "模糊", resourceId: "6911569618171597320", effectId: "4212596", overlap: true },
-  split: { name: "分割", resourceId: "6968372308419285540", effectId: "4211683", overlap: true },
-  glitch: { name: "故障", resourceId: "6725771847444468236", effectId: "2918080", overlap: false },
-};
+export { transitionCatalog } from "./jianying-profile.ts";
+
+const KEYFRAME_PROPERTIES = [
+  { source: "x", propertyType: "KFTypePositionX", convert: (value: number) => value / 50 },
+  { source: "y", propertyType: "KFTypePositionY", convert: (value: number) => -value / 50 },
+  { source: "scale", propertyType: "KFTypeScaleX", convert: (value: number) => Math.max(0.1, value) },
+  { source: "rotation", propertyType: "KFTypeRotation", convert: (value: number) => value },
+  { source: "opacity", propertyType: "KFTypeAlpha", convert: (value: number) => Math.max(0, Math.min(1, value)) },
+] as const;
+
+function visualSettings(item: Item, legacySettings: (value: Item) => ClipSettings) {
+  const base = record(item.baseTransform);
+  if (!Object.keys(base).length) return legacySettings(item);
+  return {
+    alpha: Math.max(0, Math.min(1, number(base.opacity, 1))),
+    flip: { horizontal: false, vertical: false },
+    rotation: number(base.rotation),
+    scale: { x: Math.max(0.1, number(base.scale, 1)), y: Math.max(0.1, number(base.scale, 1)) },
+    transform: { x: number(base.x) / 50, y: -number(base.y) / 50 },
+  };
+}
+
+function visualKeyframes(item: Item, duration: number, fps: number) {
+  const input = list(item.keyframes), durationUs = us(duration);
+  const properties: DraftKeyframeProperty[] = [];
+  let invalid = 0;
+  const unsupported = new Set<string>();
+  for (const frame of input) {
+    for (const key of Object.keys(frame)) {
+      if (key !== "time" && !KEYFRAME_PROPERTIES.some(property => property.source === key)) unsupported.add(key);
+    }
+  }
+  for (const property of KEYFRAME_PROPERTIES) {
+    const samples = new Map<number, number>();
+    for (const frame of input) {
+      const time = Number(frame.time), value = Number(frame[property.source]);
+      if (!(property.source in frame)) continue;
+      if (!Number.isFinite(time) || !Number.isFinite(value)) { invalid += 1; continue; }
+      const frameIndex = Math.round(Math.max(0, time) * fps);
+      const timeOffset = Math.min(durationUs, Math.round(frameIndex * 1_000_000 / fps));
+      samples.set(timeOffset, property.convert(value));
+    }
+    if (samples.size) properties.push({ propertyType: property.propertyType,
+      keyframes: [...samples].sort(([left], [right]) => left - right)
+        .map(([timeOffset, value]) => ({ timeOffset, value })) });
+  }
+  return { properties, invalid, unsupported: [...unsupported], hasY: properties.some(item => item.propertyType === "KFTypePositionY"),
+    hasAlpha: properties.some(item => item.propertyType === "KFTypeAlpha") };
+}
 
 export function mapTimeline(payload: Item, resolveMedia: MediaResolver, resolveSticker: StickerResolver = () => undefined): DraftModel {
   const ratio = RATIO_OPTIONS.find(option => option.id === payload.ratioId) ?? RATIO_OPTIONS[0];
-  const model: DraftModel = { width: ratio.width, height: ratio.height, fps: 30, tracks: [], report: { mapped: [], skipped: [] } };
+  const model: DraftModel = { width: ratio.width, height: ratio.height, fps: 30, tracks: [],
+    report: createExportReport(jianyingTargetProfile) };
   const assets = list(payload.userAssets), visibility = record(payload.trackVisibility);
-  const skip = (track: string, item: Item, feature: string, reason: string) =>
-    model.report.skipped.push({ track, segmentId: text(item.id), feature, reason });
-  const mapped = (track: string, item: Item, feature: string, reason: string) =>
-    model.report.mapped.push({ track, segmentId: text(item.id), feature, reason });
+  const report = (category: ExportReportCategory, track: string, item: Item, feature: string, reason: string) =>
+    addExportIssue(model.report, category, { track, segmentId: text(item.id), feature, reason });
+  const skip = (track: string, item: Item, feature: string, reason: string) => report("unsupported", track, item, feature, reason);
+  const mapped = (track: string, item: Item, feature: string, reason: string) => report("mapped", track, item, feature, reason);
+  const degraded = (track: string, item: Item, feature: string, reason: string) => report("degraded", track, item, feature, reason);
   const settings = (item: Item): ClipSettings => ({
     alpha: number(item.opacity, 1), flip: { horizontal: false, vertical: false },
     rotation: number(item.rotation), scale: { x: number(item.scale, 1), y: number(item.scale, 1) },
@@ -98,13 +143,30 @@ export function mapTimeline(payload: Item, resolveMedia: MediaResolver, resolveS
     const segment: DraftClip = { name: text(item.name), target: { start: begin, duration: end - begin },
       source: { start: us(sourceStart), duration: us(sourceDuration) }, speed,
       volume: item.muted ? 0 : volume, media, width: width > 0 ? width : model.width, height: height > 0 ? height : model.height,
-      clip: visual ? clipOverride ?? settings({}) : null };
+      clip: visual ? clipOverride ?? visualSettings(item, settings) : null };
+    if (visual && Array.isArray(item.keyframes) && item.keyframes.length) {
+      const motion = visualKeyframes(item, duration, model.fps);
+      if (motion.properties.length) {
+        segment.keyframes = motion.properties;
+        mapped(target.name, item, "keyframes", `${motion.properties.length} editable transform keyframe properties mapped at ${model.fps} fps.`);
+      } else {
+        skip(target.name, item, "keyframes", "No finite transform keyframes could be mapped.");
+      }
+      if (motion.invalid) degraded(target.name, item, "keyframes", `${motion.invalid} invalid keyframe samples were omitted.`);
+      if (motion.unsupported.length) skip(target.name, item, "keyframeProperties",
+        `Unsupported keyframe properties: ${motion.unsupported.join(", ")}.`);
+      if (motion.hasY) mapped(target.name, item, "keyframeY",
+        "Vertical motion uses the Jianying normalized Y-axis mapping verified in Jianying Pro 11.6.0 on macOS.");
+      if (motion.hasAlpha) degraded(target.name, item, "keyframeAlpha",
+        "Alpha keyframes remain editable but are not relied on for rendered video fades.");
+    }
     target.segments.push(segment);
     mapped(target.name, item, "clip", "Timing, source trim, constant speed and volume mapped.");
-    for (const feature of ["keyframes", "propertyKeyframes", "baseTransform", "colorGrade", "mask", "vision", "depth",
+    if (visual && present(item.baseTransform)) mapped(target.name, item, "baseTransform", "Position, scale, rotation and opacity mapped to editable clip settings.");
+    for (const feature of ["propertyKeyframes", "colorGrade", "mask", "vision", "depth",
       "subjectEffect", "smartFrame", "animation", "animations", "fadeIn", "fadeOut", "fadeInDuration", "fadeOutDuration", "volumeKeyframes"]) {
       const value = item[feature];
-      if (value && (typeof value !== "object" || Object.keys(value).length)) skip(target.name, item, feature, "Not mapped; base media is retained without this effect.");
+      if (present(value)) skip(target.name, item, feature, "Not mapped; base media is retained without this effect.");
     }
     if (item.filterId && item.filterId !== "none") skip(target.name, item, "filter", "Auto-cut filter is not a Jianying effect resource.");
     if (item.spatialEffect && item.spatialEffect !== "original") skip(target.name, item, "spatialEffect", "Audio spatial processing is not mapped.");
@@ -132,7 +194,10 @@ export function mapTimeline(payload: Item, resolveMedia: MediaResolver, resolveS
     const clip = mainClips[index], next = mainClips[index + 1];
     if (!clip || !next || !transitionCatalog[id]) { skip(main.name, item, "transition", "Unsupported transition or missing adjacent clip."); return; }
     clip.transition = { id, duration: us(Math.max(0.1, Math.min(number(transition.duration, 0.5), ranges[index].duration, ranges[index + 1].duration))) };
-    mapped(main.name, item, "transition", `Best-effort ${transitionCatalog[id].name}; visual equivalence is not guaranteed.`);
+    if (transitionCatalog[id].evidence === "jianying-11.6.0-visual-oracle") mapped(main.name, item, "transition",
+      `${transitionCatalog[id].name} uses a native Jianying resource verified in Jianying Pro 11.6.0 on macOS.`);
+    else degraded(main.name, item, "transition",
+      `${transitionCatalog[id].name} uses a legacy Jianying bootstrap resource; editable structure is retained but 11.6 visual equivalence requires oracle confirmation.`);
   });
   const timed = (items: Item[], name: string, type: "audio" | "video", volume: number, renderIndex = 0) => {
     const lanes = packTimedSegmentsIntoLanes(items, { preferredLaneKey: name === "audio" ? "lane" : "" }) as Item[][];
@@ -168,7 +233,7 @@ export function mapTimeline(payload: Item, resolveMedia: MediaResolver, resolveS
         source: null, speed: 1, volume: 1, name: "", width: 0, height: 0, text: text(item.text),
         clip: settings(record(item.placement ?? payload.captionPlacement)) });
       mapped(output.name, item, "caption", "Text, timing and placement mapped using the default Jianying font.");
-      skip(output.name, item, "captionStyle", "Font, size, styling, effects and smart avoidance are not reproduced.");
+      degraded(output.name, item, "captionStyle", "Font, size, styling, effects and smart avoidance are not reproduced.");
     }
   });
   const stickerCatalog = new Map(STICKER_LIBRARY.map(item => [item.id, item]));
@@ -188,15 +253,15 @@ export function mapTimeline(payload: Item, resolveMedia: MediaResolver, resolveS
       const clip = add(output, { ...item, name: text(item.name, catalog.name), width: media.width, height: media.height },
         number(item.start), number(item.duration), 0, true, media,
         settings({ ...item, scale: imageScale, opacity: Math.max(0, Math.min(1, number(item.opacity, 1))) }));
-      if (clip) mapped(output.name, item, "sticker", "Built-in PNG mapped as an editable image layer; it is not a native Jianying sticker resource.");
+      if (clip) degraded(output.name, item, "sticker", "Built-in PNG mapped as an editable image layer; it is not a native Jianying sticker resource.");
     }
   });
   for (const item of list(payload.timelineMarkers)) skip("markers", item, "marker", "Timeline annotations are not mapped.");
   for (const feature of ["selectedFilterId", "sourceAudioSpatialEffect"]) {
     if (payload[feature] && !["none", "original"].includes(text(payload[feature]))) skip("project", {}, feature, "Global effect is not mapped.");
   }
-  if (payload.fitMode && payload.fitMode !== "contain") skip("project", {}, "fitMode", "Jianying default contain framing is used.");
-  skip("project", {}, "fps", "The committed snapshot has no export frame rate; draft uses 30 fps.");
+  if (payload.fitMode && payload.fitMode !== "contain") degraded("project", {}, "fitMode", "Jianying default contain framing is used.");
+  degraded("project", {}, "fps", "The committed snapshot has no export frame rate; draft uses 30 fps.");
   model.tracks = model.tracks.filter(item => item.segments.length).sort((a, b) => a.renderIndex - b.renderIndex);
   return model;
 }

@@ -2,16 +2,14 @@ import { lstat, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { HostError } from "../sessions.ts";
+import { jianyingTargetProfile } from "./jianying-profile.ts";
 
 export async function jianyingDraftRoot(outputDir?: string, platform: string = process.platform, home = homedir()) {
   if (platform !== "darwin") throw new HostError("COMPONENT_NOT_READY", 503, "Jianying export currently requires macOS managed project storage.");
   if (outputDir && (!isAbsolute(outputDir) || outputDir.includes("\0"))) {
     throw new HostError("INVALID_ARGUMENT", 400, "outputDir must be an absolute directory path.");
   }
-  const candidates = outputDir ? [outputDir] : [
-    join(home, "Movies/JianyingPro/User Data/Projects/com.lveditor.draft"),
-    join(home, "Movies/JianyingPro Drafts"),
-  ];
+  const candidates = outputDir ? [outputDir] : jianyingTargetProfile.defaultDraftRoots.map(path => join(home, path));
   for (const candidate of candidates) {
     try {
       const resolved = await realpath(candidate), stat = await lstat(resolved);
