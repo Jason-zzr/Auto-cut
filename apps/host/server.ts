@@ -34,6 +34,7 @@ import { semanticTaskRecord } from "./storage/semantic-records.ts";
 import { createVisualSearchRunner } from "./visual-search-runner.ts";
 import { createVisualSearchService } from "./visual-search-service.ts";
 import { registerVisualSearchRoutes } from "./visual-search-routes.ts";
+import { registerJianyingRoutes } from "./jianying-routes.ts";
 
 const text = { type: "string", minLength: 1, maxLength: 256 };
 const object = (properties: Record<string, unknown>, required = Object.keys(properties)) => ({
@@ -212,6 +213,7 @@ export async function startHost(options: {
   registerPlanningRoutes(app, planningConfig, planning, pageFor, success, errorEnvelope);
   registerSemanticRoutes(app, semantics, pageFor, success, errorEnvelope);
   registerVisualSearchRoutes(app, visualSearch, pageFor, success, errorEnvelope);
+  registerJianyingRoutes(app, projects, options.dist, pageFor, success, errorEnvelope);
   app.get("/healthz", { schema: { querystring: emptyQuery, response: {
     200: object({ status: { const: "ready" }, protocolVersion: { const: 1 } }),
     503: object({ status: { const: "not_ready" }, protocolVersion: { const: 1 } }),
