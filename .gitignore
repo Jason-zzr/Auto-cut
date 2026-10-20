@@ -10,6 +10,10 @@ public/models/
 
 # local QA captures and generated media
 AGENTS.md
+.trellis/
+docs-control/
+export/
+exports/
 
 # local package/cache files
 .npm-cache/
